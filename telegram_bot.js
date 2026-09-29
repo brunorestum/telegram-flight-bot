@@ -350,9 +350,18 @@ async function fillGoogleSheet(list) {
       range: `${GOOGLE_SHEET_NAME}!${header + 1}:${header + 1}`
     });
     const cols = ((hdr.data.values || [[]])[0] || []).map(norm);
-    const values = list.map((d) => {
+    // "Base do imposto" = Lucro da operação - Comissão (fórmula escrita na própria linha)
+    const cLucro = ['lucro da operacao', 'lucro na operacao', 'lucro'].map((n) => cols.indexOf(n)).find((i) => i >= 0);
+    const cComissao = cols.indexOf('comissao');
+    const cBase = cols.indexOf('base do imposto');
+    const values = list.map((d, i) => {
       const m = buildRow(d, today);
-      return cols.map((c) => (c in m ? m[c] : ''));
+      const row = cols.map((c) => (c in m ? m[c] : ''));
+      if (cBase >= 0 && cLucro !== undefined && cComissao >= 0) {
+        const n = firstNew + 1 + i; // número da linha na planilha
+        row[cBase] = `=${colLetter(cLucro + 1)}${n}-${colLetter(cComissao + 1)}${n}`;
+      }
+      return row;
     });
     const lastCol = colLetter(cols.length);
     const faltando = ['data de venda', 'nome', 'comissao'].filter((c) => !cols.includes(c));
@@ -378,37 +387,6 @@ async function fillGoogleSheet(list) {
       valueInputOption: 'USER_ENTERED',
       resource: { values }
     });
-
-    // "Base do imposto" é fórmula: copia a fórmula da última venda para as linhas novas
-    const cBase = cols.indexOf('base do imposto');
-    if (cBase >= 0 && last > header) {
-      await sheets.spreadsheets.batchUpdate({
-        spreadsheetId: GOOGLE_SHEET_ID,
-        resource: {
-          requests: [
-            {
-              copyPaste: {
-                source: {
-                  sheetId,
-                  startRowIndex: last,
-                  endRowIndex: last + 1,
-                  startColumnIndex: cBase,
-                  endColumnIndex: cBase + 1
-                },
-                destination: {
-                  sheetId,
-                  startRowIndex: firstNew,
-                  endRowIndex: firstNew + values.length,
-                  startColumnIndex: cBase,
-                  endColumnIndex: cBase + 1
-                },
-                pasteType: 'PASTE_FORMULA'
-              }
-            }
-          ]
-        }
-      });
-    }
 
     return true;
   } catch (error) {
