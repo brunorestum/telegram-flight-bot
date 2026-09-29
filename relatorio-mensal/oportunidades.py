@@ -1,19 +1,60 @@
-"""Oportunidades de lucro, textos curtos e gráficos em imagem (PNG) para o Telegram.
+"""Oportunidades de lucro, análise por cliente, textos curtos e gráficos em imagem (PNG) para o Telegram.
 
-A agência é intermediária: quase todo o dinheiro que passa vai para a companhia aérea.
-O que importa é a margem sobre esse volume (o quanto fica de cada R$ 100 vendidos).
-Margem da venda = Base do imposto + Lucro não tributado + Comissão (a mesma "Receita da agência" do painel).
+A agência é intermediária. As vendas internacionais saem em consolidadoras (Ancoradouro e KG Travel): o cliente
+paga no cartão, o valor vai para a companhia e o lucro cai direto na conta da agência. O risco é mínimo e a
+comissão é baixa, então o jogo é volume, seguro e recorrência de clientes, e não "aumentar a margem" de cada bilhete.
+
+Lucro bruto da venda = Base do imposto + Lucro não tributado + Comissão (a "Receita da agência" do painel).
+Nacional x internacional vem do destino (aeroportos do itinerário), e não da companhia: a LATAM, a GOL e a Azul também voam para fora.
 """
 import collections
 import html
+import re
+import statistics
 
-NACIONAIS = {'GOL', 'LATAM', 'AZUL'}
-PISO_EMISSAO = 100.0      # lucro mínimo desejado por emissão pequena (R$)
-CORTE_GRANDE = 5000.0     # venda a partir daqui é "grande"
-PISO_GRANDE = 0.05        # margem mínima desejada nas vendas grandes
-ADESAO_SEGURO = 0.15      # premissa de mercado: 15% dos clientes internacionais levam seguro
-PREMIO_SEGURO = 300.0     # premissa: prêmio médio de R$ 300
-COMISSAO_SEGURO = 0.25    # comissão de seguro viagem: 20% a 30% do prêmio (média de mercado)
+AEROPORTOS_BR = set(
+    'GIG SDU GRU CGH VCP BSB CNF PLU POA FLN CWB VIX SSA REC FOR NAT MCZ AJU JPA SLZ THE BEL MAO CGB CGR GYN BPS IOS '
+    'NVT JOI IGU FOZ LDB MGF UDI RAO SJK VDC CXJ PMW PVH RBR BVB MCP STM MAB IMP PNZ JDO CPV JJD LEC FEN RIO SAO JPR '
+    'PET CKS ARU MOC IZA GVR UBA UNA CAW BGX CFB BAU AAX JCB CLV GEL ATM BJP SOD QSC ERM OAL FRC GPB JCM CIZ'.split())
+CONSOLIDADORAS_RE = re.compile(r'ancorad\w*|kg\s*travel', re.I)
+SEGURO_RE = re.compile(r'assist|coris|affinity|seguro|universal|gta\b', re.I)
+PAR_RE = re.compile(r'\b[A-Z]{3}-[A-Z]{3}\b')
+COMISSAO_SEGURO = 0.45     # comissão do seguro (informada pelo usuário)
+META_ADESAO_SEGURO = 0.30  # meta: 3 em cada 10 bilhetes internacionais com seguro junto
+PISO_EMISSAO = 100.0       # lucro mínimo desejado por emissão pequena (R$)
+GANHO_COMISSAO = 0.005     # premissa: +0,5 ponto de comissão/incentivo por volume nas consolidadoras
+CHANCE_VOLTAR = 0.30       # premissa: 30% dos recorrentes sumidos voltam a comprar 1 vez
+CHANCE_2A_COMPRA = 0.10    # premissa: 10% dos clientes de compra única fazem uma 2ª compra
+TIPOS = ['Nacional', 'Internacional · consolidadora', 'Internacional · outras contas', 'Hotéis e outros', 'Seguro']
+TIPOS_CURTO = ['Nacional', 'Intern. consolid.', 'Intern. outras', 'Hotéis/outros', 'Seguro']
+
+
+def lucro_bruto(t):
+    return t['base'] + t['naotrib'] + t['com']
+
+
+def eh_consolidadora(t):
+    return bool(CONSOLIDADORAS_RE.search(t['conta']))
+
+
+def produto(t):
+    """'seguro' | 'nacional' | 'internacional' | 'hotel' (hotéis e demais vendas sem trecho aéreo)."""
+    if SEGURO_RE.search(t['cia']) or SEGURO_RE.search(t['conta']):
+        return 'seguro'
+    it = (t.get('ida', '') + ' ' + t.get('volta', '')).upper()
+    if not PAR_RE.search(it):
+        return 'hotel'
+    codigos = re.findall(r'\b[A-Z]{3}\b', it)
+    return 'nacional' if all(c in AEROPORTOS_BR for c in codigos) else 'internacional'
+
+
+def tipo(t):
+    p = produto(t)
+    if p == 'nacional':
+        return TIPOS[0]
+    if p == 'internacional':
+        return TIPOS[1] if eh_consolidadora(t) else TIPOS[2]
+    return TIPOS[3] if p == 'hotel' else TIPOS[4]
 
 
 def nome_cia(k):
@@ -22,8 +63,25 @@ def nome_cia(k):
     return w.upper() if len(w) <= 3 else w.title()
 
 
-def margem_venda(t):
-    return t['base'] + t['naotrib'] + t['com']
+def nome_curto(n):
+    """Primeiro nome + segundo nome (ignora 'de', 'da'...)."""
+    ignora = {'de', 'da', 'do', 'dos', 'das', 'e'}
+    p = [w for w in n.split() if w]
+    if not p:
+        return '(sem nome)'
+    resto = [w for w in p[1:] if w.lower() not in ignora][:1]
+    return ' '.join(w.capitalize() for w in p[:1] + resto)
+
+
+def abrev(nome):
+    """'Manuela Santos' -> 'Manuela S.' (cabe nas tabelas do celular)."""
+    p = nome.split()
+    return f'{p[0]} {p[1][0]}.' if len(p) > 1 else nome
+
+
+def chave_cliente(t):
+    doc = re.sub(r'\D', '', t['cpf'])
+    return doc if len(doc) >= 11 else (t['nome'].upper().strip() or '?')
 
 
 def mil(v):
@@ -42,141 +100,204 @@ def mil(v):
 
 def analisar(vend, M, sem_pag, S, brl, pct):
     n_meses = len(M)
-    V = sum(t['valor'] for t in vend)
-    L = sum(margem_venda(t) for t in vend)
-    take = L / V
+    ref = M[-1]['m']
+    for t in vend:
+        t['_tipo'] = tipo(t)
+    seg = [t for t in vend if produto(t) == 'seguro']
+    inter = [t for t in vend if produto(t) == 'internacional']
+    pas = [t for t in vend if produto(t) in ('nacional', 'internacional')]
+    soma = lambda g, k=None: sum((lucro_bruto(t) if k is None else t[k]) for t in g)
+    V, L = soma(vend, 'valor'), soma(vend)
 
     mes = []
     for m in M:
         g = [t for t in vend if t['mes'] == m['m']]
-        v, l = sum(t['valor'] for t in g), sum(margem_venda(t) for t in g)
-        mes.append(dict(label=m['label'], vendas=v, margem_rs=l, margem=l / v if v else 0, n=len(g)))
+        mes.append(dict(label=m['label'], vendas=soma(g, 'valor'), lucro=soma(g),
+                        lucro_seg=soma([t for t in g if produto(t) == 'seguro']), n=len(g)))
 
-    por_cia = collections.defaultdict(lambda: [0, 0.0, 0.0])
+    tipos = []
+    for nome, curto in zip(TIPOS, TIPOS_CURTO):
+        g = [t for t in vend if t['_tipo'] == nome]
+        if g:
+            v_, l_ = soma(g, 'valor'), soma(g)
+            tipos.append(dict(nome=nome, curto=curto, n=len(g), valor=v_, lucro=l_, por_venda=l_ / len(g), margem=l_ / v_ if v_ else 0))
+    por_tipo = {x['nome']: x for x in tipos}
+
+    # ---- por cliente ----
+    grupos = collections.defaultdict(list)
     for t in vend:
-        k = (t['cia'] or 'SEM CIA').upper().strip()
-        x = por_cia[k]
-        x[0] += 1
-        x[1] += t['valor']
-        x[2] += margem_venda(t)
-    cias = sorted(([k, x[0], x[1], x[2], x[2] / x[1]] for k, x in por_cia.items()), key=lambda z: -z[2])
+        grupos[chave_cliente(t)].append(t)
+    clientes = []
+    for k, g in grupos.items():
+        v_, l_ = soma(g, 'valor'), soma(g)
+        clientes.append(dict(
+            k=k, nome=nome_curto(max(g, key=lambda t: len(t['nome']))['nome']), n=len(g), valor=v_, lucro=l_,
+            margem=l_ / v_ if v_ else 0, por_compra=l_ / len(g), ultima=max(t['mes'] for t in g),
+            n_inter=sum(1 for t in g if produto(t) == 'internacional'), tem_seguro=any(produto(t) == 'seguro' for t in g)))
+    clientes.sort(key=lambda c: -c['lucro'])
+    lucro_cli = sum(c['lucro'] for c in clientes)
+    seg_cli = {}
+    for nome, cond in (('recorrentes', lambda c: c['n'] >= 3), ('ocasionais', lambda c: c['n'] == 2), ('unicos', lambda c: c['n'] == 1)):
+        g = [c for c in clientes if cond(c)]
+        seg_cli[nome] = dict(n=len(g), lucro=sum(c['lucro'] for c in g), share=sum(c['lucro'] for c in g) / lucro_cli if lucro_cli else 0)
+    recorrentes = [c for c in clientes if c['n'] >= 3]
+    sumidos = [c for c in clientes if c['n'] >= 2 and c['ultima'] <= ref - 3]
+    unicos = [c for c in clientes if c['n'] == 1]
+    sem_seguro = sorted([c for c in clientes if c['n_inter'] >= 2 and not c['tem_seguro']], key=lambda c: -c['n_inter'])
+    melhores_margens = sorted([c for c in recorrentes if c['lucro'] >= 1000], key=lambda c: -c['margem'])[:5]
 
-    # cias que puxam a margem para baixo: muito volume, pouca margem
-    baixas = [c for c in cias[:10] if c[4] < take * 0.5]
-    vol_baixas = sum(c[2] for c in baixas)
-    mar_baixas = sum(c[3] for c in baixas)
-
+    # ---- oportunidades ----
     ops = []
-
-    # 1) piso por emissão pequena
-    peq = [t for t in vend if t['valor'] < CORTE_GRANDE and margem_venda(t) < PISO_EMISSAO]
-    falta = sum(PISO_EMISSAO - margem_venda(t) for t in peq)
-    ganho = falta * 0.5
-    ops.append(dict(
-        chave='piso', curto='Piso de lucro por emissão', titulo=f'Piso de {brl(PISO_EMISSAO).replace(",00", "")} de lucro por emissão', ganho=ganho, esforco='Baixo',
-        por_que=f'{len(peq)} das {len(vend)} vendas ({pct(len(peq) / len(vend), 0)}) deixaram menos de {brl(PISO_EMISSAO).replace(",00", "")} para a agência. '
-                f'Emitir dá o mesmo trabalho com R$ 30 ou com R$ 300 de lucro.',
-        passo='Cobrar uma taxa de emissão/serviço (ou arredondar o preço para cima) até o lucro chegar no piso. '
-              'Comece pelos clientes novos e pelas emissões avulsas.',
-        premissa=f'Estimativa considerando que só metade dos casos aceite ({mil(falta)} se todos aceitassem).'))
-
-    # 2) piso de margem nas vendas grandes
-    grandes = [t for t in vend if t['valor'] >= CORTE_GRANDE and margem_venda(t) / t['valor'] < PISO_GRANDE]
-    ganho_g = sum(PISO_GRANDE * t['valor'] - margem_venda(t) for t in grandes)
-    vol_g = sum(t['valor'] for t in grandes)
-    mar_g = sum(margem_venda(t) for t in grandes)
-    ops.append(dict(
-        chave='grandes', curto='Margem mínima nas vendas grandes', titulo=f'Margem mínima de {pct(PISO_GRANDE, 0)} nas vendas grandes', ganho=ganho_g, esforco='Médio',
-        por_que=f'{len(grandes)} vendas acima de {brl(CORTE_GRANDE).replace(",00", "")} movimentaram {mil(vol_g)} e deixaram só {pct(mar_g / vol_g)} '
-                f'(a média da agência é {pct(take)}). Venda grande imobiliza caixa e cartão, e paga pouco pelo risco.',
-        passo='Só fechar venda grande abaixo do piso se o cliente for recorrente ou a venda trouxer hotel/seguro junto. '
-              'Se a cia é sempre a mesma, negociar taxa fixa por bilhete.',
-        premissa='Estimativa: supõe que os clientes aceitem pagar o piso, sem perder a venda.'))
-
-    # 3) cartão parcelado
-    cart = [t for t in vend if 'cart' in t['pag'].lower()]
-    pix = [t for t in vend if 'pix' in t['pag'].lower() and 'cart' not in t['pag'].lower()]
-    mg = lambda g: (sum(margem_venda(t) for t in g) / sum(t['valor'] for t in g)) if g else 0
-    Vc = sum(t['valor'] for t in cart)
-    if cart:
+    lucros_seg = [lucro_bruto(t) for t in seg]
+    seg_med = sum(lucros_seg) / len(seg) if seg else 0
+    seg_mediana = statistics.median(lucros_seg) if seg else 0
+    adesao = len(seg) / len(inter) if inter else 0
+    baixas_seg = [t for t in seg if t['valor'] > 0 and lucro_bruto(t) / t['valor'] < 0.35]
+    if seg and inter:
+        extra = max(0, META_ADESAO_SEGURO - adesao) * len(inter)
+        aviso = ''
+        if baixas_seg:
+            nomes_b = ' e '.join(f'{t["cia"].strip().title()} ({pct(lucro_bruto(t) / t["valor"], 0)})' for t in baixas_seg[:3])
+            aviso = f' Atenção: {nomes_b} {'deixou' if len(baixas_seg) == 1 else 'deixaram'} menos que os {pct(COMISSAO_SEGURO, 0)} das outras apólices. Prefira as seguradoras que pagam mais.'
         ops.append(dict(
-            chave='cartao', curto='Taxa no cartão parcelado', titulo='Repassar 1 ponto de taxa nas vendas no cartão', ganho=Vc * 0.01, esforco='Médio',
-            por_que=f'{len(cart)} vendas no cartão ({mil(Vc)}) ficam com {pct(mg(cart))} de margem'
-                    + (f'; no pix, com {pct(mg(pix))}.' if pix else '.') + ' A taxa do cartão sai do lucro da agência.',
-            passo='Tabela simples: à vista no pix = preço base; cartão = preço base + taxa do parcelamento. Ou dar desconto no pix.',
-            premissa='Estimativa: 1 ponto percentual a mais sobre todo o volume no cartão do período.'))
-
-    # 4) seguro viagem nos clientes internacionais
-    inter = [t for t in vend if (t['cia'] or '').upper().strip() not in NACIONAIS]
-    ganho_s = len(inter) * ADESAO_SEGURO * PREMIO_SEGURO * COMISSAO_SEGURO
+            chave='seguro', curto='Seguro em mais bilhetes internacionais', ganho=extra * seg_mediana, esforco='Baixo',
+            por_que=f'Você vendeu {len(seg)} seguros para {len(inter)} bilhetes internacionais ({pct(adesao, 0)}). Como a comissão é de {pct(COMISSAO_SEGURO, 0)}, '
+                    f'uma apólice típica deixa {brl(seg_mediana)} (média de {brl(seg_med)}), sem risco. '
+                    f'{len(sem_seguro)} clientes com 2 ou mais bilhetes internacionais nunca compraram seguro com você.' + aviso,
+            passo='Colocar o seguro na cotação de todo bilhete internacional (Coris, Assist Card, Affinity...), com 2 opções: básico e completo. '
+                  'Começar pelos clientes recorrentes da lista abaixo.',
+            premissa=f'Estimativa conservadora: subir de {pct(adesao, 0)} para {pct(META_ADESAO_SEGURO, 0)} dos bilhetes internacionais, com o lucro mediano por apólice da sua planilha '
+                     f'(com a média, seria {mil(extra * seg_med)}).'))
+    cons = [t for t in inter if eh_consolidadora(t)]
+    v_cons = soma(cons, 'valor')
+    if cons:
+        ops.append(dict(
+            chave='comissao', curto='Melhor comissão nas consolidadoras', ganho=v_cons * GANHO_COMISSAO, esforco='Médio',
+            por_que=f'Você movimentou {mil(v_cons)} em {len(cons)} bilhetes internacionais nas consolidadoras (Ancoradouro/KG Travel) e o lucro foi de {pct(soma(cons) / v_cons)} desse volume. '
+                    'Como o ganho é comissão sobre o volume, o volume é o seu argumento de negociação.',
+            passo='Levar o volume por cia e por mês para a consolidadora e pedir incentivo por meta (comissão maior acima de um volume mensal). '
+                  'Cotar a mesma cia nas duas consolidadoras e concentrar onde pagar mais.',
+            premissa=f'Estimativa: +{pct(GANHO_COMISSAO).replace("%", " ponto percentual")} de comissão sobre o volume das consolidadoras. Depende do que elas aceitarem.'))
+    if sumidos:
+        ops.append(dict(
+            chave='reativar', curto='Reativar recorrentes que sumiram', ganho=CHANCE_VOLTAR * sum(c['por_compra'] for c in sumidos), esforco='Baixo',
+            por_que=f'{len(sumidos)} clientes que compraram 2 vezes ou mais não compram há 3 meses ou mais (lucro médio de {brl(sum(c["por_compra"] for c in sumidos) / len(sumidos))} por compra).',
+            passo='Mensagem pessoal no WhatsApp: perguntar da próxima viagem e mandar uma cotação já pronta na rota que ele costuma fazer.',
+            premissa=f'Estimativa: {pct(CHANCE_VOLTAR, 0)} deles compram 1 vez de novo.'))
+    if unicos:
+        ops.append(dict(
+            chave='segunda', curto='Fazer o cliente de 1 compra voltar', ganho=CHANCE_2A_COMPRA * sum(c['por_compra'] for c in unicos), esforco='Médio',
+            por_que=f'{len(unicos)} clientes compraram só 1 vez ({pct(seg_cli["unicos"]["share"], 0)} do lucro). Fazer um cliente voltar custa muito menos que conquistar um novo.',
+            passo='Falar com o cliente 7 dias depois da viagem (pedir indicação e oferecer a próxima) e de novo 45 dias antes da mesma época no ano seguinte.',
+            premissa=f'Estimativa: {pct(CHANCE_2A_COMPRA, 0)} deles fazem uma 2ª compra.'))
+    peq = [t for t in pas if t['valor'] < 5000 and lucro_bruto(t) < PISO_EMISSAO]
+    falta = sum(PISO_EMISSAO - lucro_bruto(t) for t in peq)
     ops.append(dict(
-        chave='seguro', curto='Seguro viagem', titulo='Vender seguro viagem junto com o bilhete internacional', ganho=ganho_s, esforco='Baixo',
-        por_que=f'{len(inter)} vendas foram de outras cias (fora GOL/LATAM/AZUL), em geral viagens ao exterior, onde seguro é quase obrigatório. '
-                'Hoje a agência não ganha nada com isso.',
-        passo='Oferecer o seguro na hora de fechar a passagem, com um parceiro que pague comissão de 20% a 30% do prêmio.',
-        premissa=f'Premissa de mercado, não da sua planilha: {pct(ADESAO_SEGURO, 0)} de adesão, prêmio de {brl(PREMIO_SEGURO).replace(",00", "")}, comissão de {pct(COMISSAO_SEGURO, 0)}.'))
-
+        chave='piso', curto='Piso de lucro por emissão', ganho=falta * 0.5, esforco='Baixo',
+        por_que=f'{len(peq)} emissões deixaram menos de {brl(PISO_EMISSAO).replace(",00", "")} de lucro. Emitir dá o mesmo trabalho com R$ 30 ou com R$ 300.',
+        passo='Cobrar uma taxa de serviço nas emissões pequenas até o lucro chegar ao piso. Comece pelos clientes novos.',
+        premissa=f'Estimativa: só metade dos casos aceita ({mil(falta)} se todos aceitassem).'))
     ops.sort(key=lambda o: -o['ganho'])
-    total = sum(o['ganho'] for o in ops)
 
     return dict(
-        V=V, L=L, take=take, n_meses=n_meses, n=len(vend), mes=mes, cias=cias, baixas=baixas,
-        vol_baixas=vol_baixas, mar_baixas=mar_baixas, ops=ops, total=total, por_venda=L / len(vend),
-        sem_pag=(len(sem_pag), sum(t['valor'] for t in sem_pag)),
-        Vc=Vc, mg_cart=mg(cart), mg_pix=mg(pix), n_peq=len(peq),
+        V=V, L=L, n=len(vend), n_meses=n_meses, mes=mes, tipos=tipos, por_tipo=por_tipo, ops=ops, total=sum(o['ganho'] for o in ops),
+        n_inter=len(inter), l_inter=soma(inter), v_inter=soma(inter, 'valor'),
+        seg=dict(n=len(seg), valor=soma(seg, 'valor'), lucro=soma(seg), margem=soma(seg) / soma(seg, 'valor') if seg else 0,
+                 med=seg_med, mediana=seg_mediana, adesao=adesao),
+        clientes=clientes, lucro_cli=lucro_cli, seg_cli=seg_cli, recorrentes=recorrentes, sumidos=sumidos, unicos=unicos,
+        sem_seguro=sem_seguro, melhores_margens=melhores_margens, ref=ref, sem_pag=(len(sem_pag), soma(sem_pag, 'valor')),
     )
 
 
 # ---------- textos (Telegram, HTML) ----------
-def mensagens(O, M, parcial, rotulo_fim, res, top_conta, R, brl, pct):
+def sequencia(O, parcial, rotulo_fim, res, top_conta, R, brl, pct, meses_abrev, imgs):
+    """Lista ordenada de ('texto', str) e ('imagem', (Path, legenda)) para enviar ao Telegram."""
     esc = html.escape
-    fim, melhor = O['mes'][-1], max(O['mes'], key=lambda x: x['margem'])
-    tend = ''
-    if len(O['mes']) > 1 and fim['margem'] < melhor['margem'] - 0.005:
-        tend = (f'\nA margem caiu de <b>{pct(melhor["margem"])}</b> ({melhor["label"]}) para <b>{pct(fim["margem"])}</b> ({fim["label"]}). ')
-        if O['baixas']:
-            nomes = ', '.join(nome_cia(c[0]) for c in O['baixas'][:3])
-            tend += (f'As cias {esc(nomes)} movimentam {pct(O["vol_baixas"] / O["V"], 0)} do volume e deixam só {pct(O["mar_baixas"] / O["vol_baixas"])}: '
-                     'muito dinheiro passando, pouco ficando.')
+    c1 = O['clientes'][0]
+    share1 = c1['lucro'] / O['lucro_cli']
+
+    linhas_tipo = []
+    for x in O['tipos']:
+        linhas_tipo.append(f'• {esc(x["nome"])}: <b>{brl(x["por_venda"])}</b> por venda ({x["n"]} vendas, {pct(x["margem"], 0)} do valor)')
     m1 = (f'<b>Agência do Futuro · até {rotulo_fim}</b>\n'
-          f'Passaram pela agência <b>{mil(O["V"])}</b> em {O["n"]} vendas (quase tudo vai para as companhias aéreas). '
-          f'Ficaram <b>{mil(O["L"])}</b> antes de custos: <b>{brl(O["take"] * 100).replace(",00", "")} de cada R$ 100</b>, ou {brl(O["por_venda"])} por venda.\n'
-          f'Depois de custos e comissões, o lucro do ano é <b>{brl(res)}</b> (média de {brl(res / O["n_meses"])}/mês).'
-          + tend)
+          f'Passaram pela agência <b>{mil(O["V"])}</b> em {O["n"]} vendas (quase tudo vai direto para as cias aéreas). '
+          f'O lucro bruto foi de <b>{mil(O["L"])}</b>, uns <b>{mil(O["L"] / O["n_meses"])} por mês</b>.\n'
+          f'Depois de custos e comissões, o lucro do ano é <b>{brl(res)}</b> (média de {brl(res / O["n_meses"])}/mês).\n\n'
+          '<b>Quanto cada tipo de venda deixa, em média</b>\n' + '\n'.join(linhas_tipo) + '\n\n'
+          'No internacional você ganha comissão sobre o volume, com risco mínimo. O que muda o resultado é vender mais bilhetes, '
+          'vender o seguro junto e fazer o cliente voltar.\n'
+          f'Cada 10% a mais de bilhetes internacionais = <b>+{mil(O["l_inter"] * 0.1 / O["n_meses"])} por mês</b>.')
 
     linhas = [f'<b>Onde dá para ganhar mais</b>\nPotencial estimado: <b>+{mil(O["total"])}</b> no período (≈ {mil(O["total"] / O["n_meses"])}/mês), '
               'somando as ideias abaixo. São estimativas, não promessas.\n']
     for i, o in enumerate(O['ops'], 1):
-        linhas.append(f'<b>{i}. {esc(o["titulo"])}</b> · +{mil(o["ganho"])} · esforço {o["esforco"].lower()}\n'
+        linhas.append(f'<b>{i}. {esc(o["curto"])}</b> · +{mil(o["ganho"])} · esforço {o["esforco"].lower()}\n'
                       f'{esc(o["por_que"])}\n<i>Como:</i> {esc(o["passo"])}\n<i>{esc(o["premissa"])}</i>\n')
     m2 = '\n'.join(linhas)
 
-    tab = ['Cia            Vendido  Margem', '-' * 31]
-    for c in O['cias'][:8]:
-        tab.append(f'{nome_cia(c[0]):<13} {mil(c[2]).replace("R$ ", ""):>8}  {pct(c[4]):>6}')
-    tab.append(f'{"Total":<13} {mil(O["V"]).replace("R$ ", ""):>8}  {pct(O["take"]):>6}')
-    m3 = '<b>Margem por companhia</b> (do que passa, quanto fica)\n<pre>' + '\n'.join(tab) + '</pre>'
+    tab = ['Tipo             Vendas Lucro/venda Marg.', '-' * 38]
+    for x in O['tipos']:
+        tab.append(f'{x["curto"]:<16} {x["n"]:>5} {mil(x["por_venda"]).replace("R$ ", ""):>10} {pct(x["margem"]):>6}')
+    m3 = ('<b>Por tipo de venda</b>\n<pre>' + '\n'.join(tab) + '</pre>\n'
+          '<i>Nacional ou internacional pelo destino do voo. Consolidadora = Ancoradouro e KG Travel.</i>')
+
+    sc = O['seg_cli']
+    tabc = ['Cliente       Comp. Lucro  Marg. Últ.', '-' * 36]
+    for c in O['clientes'][:8]:
+        tabc.append(f'{abrev(c["nome"])[:13]:<13} {c["n"]:>4} {mil(c["lucro"]).replace("R$ ", ""):>6} {pct(c["margem"], 0):>5} {meses_abrev[c["ultima"] - 1]:>4}')
+    m5 = (f'<b>Seus clientes ({len(O["clientes"])} no período)</b>\n'
+          f'• <b>{sc["recorrentes"]["n"]} recorrentes</b> (3+ compras) geram <b>{pct(sc["recorrentes"]["share"], 0)}</b> do lucro bruto.\n'
+          f'• {sc["ocasionais"]["n"]} ocasionais (2 compras): {pct(sc["ocasionais"]["share"], 0)}.\n'
+          f'• {sc["unicos"]["n"]} de compra única: {pct(sc["unicos"]["share"], 0)}.\n'
+          f'• O maior cliente ({esc(c1["nome"])}) sozinho é <b>{pct(share1, 0)}</b> do lucro, com {c1["n"]} compras.\n\n'
+          '<b>Maiores clientes por lucro</b>\n<pre>' + '\n'.join(tabc) + '</pre>')
+    if O['melhores_margens']:
+        m5 += '\n<b>Melhores margens entre os recorrentes</b>\n' + '\n'.join(
+            f'• {esc(c["nome"])}: {pct(c["margem"])} em {c["n"]} compras ({mil(c["lucro"])})' for c in O['melhores_margens'])
+
+    acoes = ['<b>O que fazer com os clientes recorrentes</b>']
+    if O['sem_seguro']:
+        nomes = ', '.join(esc(c['nome']) for c in O['sem_seguro'][:5])
+        acoes.append(f'1. <b>Vender seguro para quem já viaja com você:</b> {nomes} têm 2+ bilhetes internacionais e nenhum seguro comprado com você.')
+    if c1['n'] >= 12:
+        acoes.append(f'2. <b>Formalizar o maior cliente</b> ({esc(c1["nome"])}, {c1["n"]} compras, {pct(share1, 0)} do lucro): '
+                     'contrato com taxa de serviço mensal ou prioridade de atendimento. Hoje um único cliente sustenta boa parte do resultado.')
+    alto_vol = [c for c in O['recorrentes'] if c['margem'] < 0.05 and c['valor'] >= 50000]
+    if alto_vol:
+        acoes.append(f'3. <b>Alto volume e comissão baixa</b> ({", ".join(esc(c["nome"]) for c in alto_vol[:3])}): '
+                     'some hotel, seguro e transfer na mesma venda para subir o lucro por cliente.')
+    if O['sumidos']:
+        n_ = ', '.join(esc(c['nome']) for c in sorted(O['sumidos'], key=lambda c: -c['lucro'])[:5])
+        acoes.append(f'4. <b>Reativar quem sumiu</b> (3+ meses sem comprar): {n_}. Mande uma cotação pronta na rota que costumam fazer.')
+    acoes.append('5. <b>Chamar 45 dias antes da próxima viagem:</b> anote em que mês cada recorrente costuma viajar. É quando a tarifa ainda está boa e ele ainda não cotou com outra agência.')
+    acoes.append('6. <b>Pedir indicação</b> aos clientes de melhor margem, logo depois da viagem.')
+    m6 = '\n\n'.join(acoes)
 
     aten = []
     if O['sem_pag'][0]:
         aten.append(f'• {O["sem_pag"][0]} vendas ({mil(O["sem_pag"][1])}) sem forma de pagamento anotada: confirme se o dinheiro entrou.')
     if top_conta:
-        aten.append(f'• A conta "{esc(top_conta[0].title())}" emite {pct(top_conta[1] / O["V"], 0)} do volume da agência. Se ela travar, o faturamento trava junto.')
+        aten.append(f'• A conta "{esc(top_conta[0].title())}" emite {pct(top_conta[1] / O["V"], 0)} do volume. Se ela travar, o faturamento trava junto.')
     if R:
         aten.append(f'• Suas retiradas: {brl(R["ret"])} no ano, contra um direito de {brl(R["dir"])} (saldo acumulado {brl(R["fim"])}).')
     m4 = '<b>Atenção</b>\n' + '\n'.join(aten) if aten else ''
-    return [m for m in (m1, m2, m3, m4) if m]
+
+    seq = [('texto', m1), ('imagem', imgs['lucro']), ('imagem', imgs['tipos']), ('texto', m3), ('texto', m2), ('imagem', imgs['oportunidades']),
+           ('texto', m5), ('imagem', imgs['clientes']), ('texto', m6)]
+    if m4:
+        seq.append(('texto', m4))
+    return seq
 
 
 # ---------- gráficos (PNG) ----------
-INK, MUTED, GRID, ACCENT, ALERT = '#1f2933', '#6b7785', '#e3e7ec', '#2f6fdb', '#c9541d'
+INK, MUTED, GRID, ACCENT, ACCENT2, NEUTRAL = '#1f2933', '#6b7785', '#e3e7ec', '#2f6fdb', '#e08a1e', '#a9b3bf'
 
 
 def _base(titulo, sub):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    plt.rcParams.update({'font.family': 'DejaVu Sans', 'text.color': INK, 'axes.edgecolor': GRID})
+    plt.rcParams.update({'font.family': 'DejaVu Sans', 'text.color': INK, 'axes.edgecolor': GRID, 'text.parse_math': False})
     fig, ax = plt.subplots(figsize=(7.2, 4.4), dpi=150)
     fig.patch.set_facecolor('white')
     ax.set_facecolor('white')
@@ -192,57 +313,68 @@ def _pct(v):
     return f'{v * 100:.1f}'.replace('.', ',') + '%'
 
 
+def _salva(fig, plt, out, nome):
+    p = out / nome
+    fig.savefig(p)
+    plt.close(fig)
+    return p
+
+
 def graficos(O, out, sufixo):
-    """Retorna [(caminho, legenda)]."""
-    imgs = []
+    """Retorna dict nome -> (caminho, legenda)."""
+    imgs = {}
 
-    # 1) margem por mês
-    fig, ax, plt = _base('Quanto fica de cada R$ 100 vendidos', 'Margem da agência por mês, antes de custos fixos e comissões')
+    # 1) lucro bruto por mês (passagens + seguros), com o volume embaixo de cada mês
+    fig, ax, plt = _base('Quanto a agência ganhou por mês', 'Lucro bruto (antes de comissões e custos). Embaixo de cada mês: quanto passou pela agência')
     xs = list(range(len(O['mes'])))
-    ys = [m['margem'] * 100 for m in O['mes']]
-    ax.plot(xs, ys, color=ACCENT, linewidth=2, marker='o', markersize=6, markeredgecolor='white', markeredgewidth=1.5)
-    ax.axhline(O['take'] * 100, color=MUTED, linewidth=1, linestyle=(0, (4, 3)))
-    ax.text(len(xs) - 0.6, O['take'] * 100, f'média {_pct(O["take"])}', color=MUTED, fontsize=8.5, va='bottom', ha='right')
-    for i in {0, len(xs) - 1, ys.index(max(ys)), ys.index(min(ys))}:
-        baixo = i == ys.index(min(ys))
-        ax.annotate(_pct(ys[i] / 100), (xs[i], ys[i]), textcoords='offset points', xytext=(0, -17 if baixo else 9),
-                    ha='center', fontsize=9, color=INK)
+    pas = [m['lucro'] - m['lucro_seg'] for m in O['mes']]
+    sg = [m['lucro_seg'] for m in O['mes']]
+    topo = max(m['lucro'] for m in O['mes'])
+    ax.bar(xs, pas, color=ACCENT, width=0.62, label='Passagens e hotéis')
+    ax.bar(xs, sg, bottom=pas, color=ACCENT2, width=0.62, label='Seguros')
+    for x, m in zip(xs, O['mes']):
+        ax.text(x, m['lucro'] + topo * 0.02, mil(m['lucro']).replace('R$ ', ''), ha='center', fontsize=8.5, color=INK)
     ax.set_xticks(xs)
-    ax.set_xticklabels([m['label'] for m in O['mes']], fontsize=8.5)
-    ax.set_ylim(0, max(ys) * 1.25)
-    ax.yaxis.set_major_formatter(lambda v, _: f'{v:.0f}%')
-    ax.grid(axis='y', color=GRID, linewidth=0.8)
-    ax.set_axisbelow(True)
-    fig.subplots_adjust(top=0.78, bottom=0.11, left=0.08, right=0.97)
-    p = out / f'margem-mensal-{sufixo}.png'
-    fig.savefig(p)
-    plt.close(fig)
-    imgs.append((p, 'Margem por mês: de cada R$ 100 vendidos, quanto fica na agência.'))
+    ax.set_xticklabels([f'{m["label"][:3]}\n{mil(m["vendas"]).replace("R$ ", "")}' for m in O['mes']], fontsize=8)
+    ax.set_ylim(0, topo * 1.2)
+    ax.yaxis.set_visible(False)
+    ax.legend(loc='upper left', frameon=False, fontsize=8.5, ncol=2)
+    fig.subplots_adjust(top=0.80, bottom=0.14, left=0.04, right=0.98)
+    imgs['lucro'] = (_salva(fig, plt, out, f'lucro-mensal-{sufixo}.png'),
+                     'Lucro bruto por mês (azul = passagens e hotéis, laranja = seguros). Embaixo do mês: quanto passou pela agência.')
 
-    # 2) margem por cia
-    top = O['cias'][:8][::-1]
-    fig, ax, plt = _base('Margem por companhia aérea', 'Barra = margem. Texto = quanto passou pela agência. Laranja = abaixo da média')
-    ys = list(range(len(top)))
-    cores = [ACCENT if c[4] >= O['take'] else ALERT for c in top]
-    ax.barh(ys, [c[4] * 100 for c in top], color=cores, height=0.62)
-    ax.axvline(O['take'] * 100, color=MUTED, linewidth=1, linestyle=(0, (4, 3)))
-    ax.text(O['take'] * 100, len(top) - 0.35, f'média {_pct(O["take"])}', ha='center', va='bottom', fontsize=8.5, color=MUTED)
+    # 2) quanto cada tipo de venda deixa
+    tp = O['tipos'][::-1]
+    fig, ax, plt = _base('Quanto cada tipo de venda deixa', 'Barra = lucro médio por venda. Texto = vendas, volume que passou e % do valor')
+    ys = list(range(len(tp)))
+    ax.barh(ys, [x['por_venda'] for x in tp], color=[ACCENT2 if x['nome'] == 'Seguro' else ACCENT for x in tp], height=0.62)
     ax.set_yticks(ys)
-    ax.set_yticklabels([nome_cia(c[0]) for c in top], fontsize=9, color=INK)
-    mx = max(c[4] for c in top) * 100
-    for y, c in zip(ys, top):
-        ax.text(c[4] * 100 + mx * 0.015, y, f'{_pct(c[4])} · {mil(c[2])}', va='center', fontsize=8.5, color=INK,
-                bbox=dict(facecolor='white', edgecolor='none', pad=1.5), zorder=5)
-    ax.set_xlim(0, mx * 1.55)
+    ax.set_yticklabels([x['curto'] for x in tp], fontsize=9, color=INK)
+    mx = max(x['por_venda'] for x in tp)
+    for y, x in zip(ys, tp):
+        ax.text(x['por_venda'] + mx * 0.015, y, f'R$ {x["por_venda"]:.0f} · {x["n"]} vendas · {mil(x["valor"])} · {_pct(x["margem"])}', va='center', fontsize=8.5, color=INK)
+    ax.set_xlim(0, mx * 2.25)
     ax.xaxis.set_visible(False)
-    ax.set_ylim(-0.6, len(top) - 0.1)
-    fig.subplots_adjust(top=0.78, bottom=0.05, left=0.22, right=0.97)
-    p = out / f'margem-cias-{sufixo}.png'
-    fig.savefig(p)
-    plt.close(fig)
-    imgs.append((p, 'Margem por companhia. Laranja = abaixo da média da agência.'))
+    fig.subplots_adjust(top=0.80, bottom=0.05, left=0.19, right=0.98)
+    imgs['tipos'] = (_salva(fig, plt, out, f'tipos-{sufixo}.png'),
+                     'Lucro médio por venda em cada tipo. Nacional e internacional são separados pelo destino do voo.')
 
-    # 3) oportunidades
+    # 3) maiores clientes por lucro
+    cl = O['clientes'][:8][::-1]
+    fig, ax, plt = _base('Seus maiores clientes por lucro', 'Barra = lucro bruto no período. Texto = compras e margem. Azul = recorrente (3+ compras)')
+    ys = list(range(len(cl)))
+    ax.barh(ys, [c['lucro'] for c in cl], color=[ACCENT if c['n'] >= 3 else NEUTRAL for c in cl], height=0.62)
+    ax.set_yticks(ys)
+    ax.set_yticklabels([abrev(c['nome']) for c in cl], fontsize=9, color=INK)
+    mx = max(c['lucro'] for c in cl)
+    for y, c in zip(ys, cl):
+        ax.text(c['lucro'] + mx * 0.015, y, f'{mil(c["lucro"])} · {c["n"]} compras · {_pct(c["margem"])}', va='center', fontsize=8.5, color=INK)
+    ax.set_xlim(0, mx * 1.7)
+    ax.xaxis.set_visible(False)
+    fig.subplots_adjust(top=0.80, bottom=0.05, left=0.25, right=0.98)
+    imgs['clientes'] = (_salva(fig, plt, out, f'clientes-{sufixo}.png'), 'Maiores clientes por lucro bruto.')
+
+    # 4) oportunidades
     ops = O['ops'][::-1]
     fig, ax, plt = _base('Onde dá para ganhar mais', f'Ganho estimado no período (estimativa). Total: +{mil(O["total"])}')
     ys = list(range(len(ops)))
@@ -254,9 +386,6 @@ def graficos(O, out, sufixo):
         ax.text(o['ganho'] + mx * 0.015, y, f'+{mil(o["ganho"])}', va='center', fontsize=9, color=INK)
     ax.set_xlim(0, mx * 1.3)
     ax.xaxis.set_visible(False)
-    fig.subplots_adjust(top=0.78, bottom=0.05, left=0.42, right=0.97)
-    p = out / f'oportunidades-{sufixo}.png'
-    fig.savefig(p)
-    plt.close(fig)
-    imgs.append((p, 'Ganho estimado por oportunidade (estimativas).'))
+    fig.subplots_adjust(top=0.80, bottom=0.05, left=0.45, right=0.97)
+    imgs['oportunidades'] = (_salva(fig, plt, out, f'oportunidades-{sufixo}.png'), 'Ganho estimado por oportunidade (estimativas).')
     return imgs

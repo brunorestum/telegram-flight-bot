@@ -116,7 +116,8 @@ def ler_vendas(wv, wf):
     c = dict(mes=col(h, 'Mês'), conta=col(h, 'Conta'), cia=col(h, 'Cia aérea'), cpf=col(h, 'CPF'),
              nome=col(h, 'Nome'), valor=col(h, 'Valor'), base=col(h, 'Base do imposto', 'Lucro na operação'),
              naotrib=col(h, 'Lucro não tributado'), vend=col(h, 'Vendedor'), com=col(h, 'Comissão'),
-             pag=col(h, 'Pagamento'), data=col(h, 'Data de venda'))
+             pag=col(h, 'Pagamento'), data=col(h, 'Data de venda'),
+             ida=col(h, 'Itinerario da ida'), volta=col(h, 'Itinerário da volta'))
     tx, r = [], 2
     while r <= ws.max_row:
         a, b = txt(ws.cell(r, 1).value).lower(), txt(ws.cell(r, 2).value).lower()
@@ -131,7 +132,8 @@ def ler_vendas(wv, wf):
                 cpf=txt(ws.cell(r, c['cpf']).value), nome=txt(ws.cell(r, c['nome']).value),
                 valor=num(ws.cell(r, c['valor']).value), base=num(ws.cell(r, c['base']).value),
                 naotrib=num(ws.cell(r, c['naotrib']).value), vend=txt(ws.cell(r, c['vend']).value),
-                com=num(ws.cell(r, c['com']).value), pag=txt(ws.cell(r, c['pag']).value)))
+                com=num(ws.cell(r, c['com']).value), pag=txt(ws.cell(r, c['pag']).value),
+                ida=txt(ws.cell(r, c['ida']).value), volta=txt(ws.cell(r, c['volta']).value)))
         r += 1
     # quadro-resumo mensal (custos fixos são digitados à mão lá)
     hr = next(i for i in range(r, ws.max_row + 1) if txt(ws.cell(i, 1).value).lower() == 'mes')
@@ -388,8 +390,8 @@ def analisar(tx, resumo, total_row, renda, fluxo, pend_fluxo, ret, hoje):
     )
     R = analisar_retiradas(ret, M, ref, ano, hoje, parcial) if ret else None
     O = oportunidades.analisar(vend, M, sem_pag, S, brl, pct)
-    msgs = oportunidades.mensagens(O, M, parcial, rotulo_fim, res, (top_conta[0], top_conta[1][0]), R, brl, pct)
-    return D, R, msgs, O
+    ctx = dict(parcial=parcial, rotulo=rotulo_fim, res=res, top_conta=(top_conta[0], top_conta[1][0]))
+    return D, R, O, ctx
 
 
 def mascara(doc):
@@ -479,28 +481,36 @@ def render(nome, dados):
     return html.replace('/*__CSS__*/', css).replace('/*__DATA__*/null', json.dumps(dados, ensure_ascii=False, default=str))
 
 
-def enviar_telegram(msgs, imagens, arquivos):
-    """Mensagens de texto e imagens aparecem em qualquer celular; os HTML vão no fim, como extra."""
+def _pedacos(texto, limite=3900):
+    """Telegram aceita até 4096 caracteres por mensagem: quebra em parágrafos se passar."""
+    if len(texto) <= limite:
+        return [texto]
+    partes, atual = [], ''
+    for par in texto.split('\n\n'):
+        if atual and len(atual) + len(par) + 2 > limite:
+            partes.append(atual)
+            atual = par
+        else:
+            atual = f'{atual}\n\n{par}' if atual else par
+    return partes + [atual]
+
+
+def enviar_telegram(seq, arquivos):
+    """Texto e imagens aparecem em qualquer celular; os HTML vão no fim, como extra."""
     import requests
     token, chat = os.environ['TELEGRAM_BOT_TOKEN'], os.environ['TELEGRAM_CHAT_ID']
     base = f'https://api.telegram.org/bot{token}'
-
-    def texto(m):
-        r = requests.post(f'{base}/sendMessage', data=dict(chat_id=chat, text=m, parse_mode='HTML',
-                                                            disable_web_page_preview='true'), timeout=60)
-        r.raise_for_status()
-
-    texto(msgs[0])
-    for p, legenda in imagens[:2]:
-        with open(p, 'rb') as f:
-            r = requests.post(f'{base}/sendPhoto', data=dict(chat_id=chat, caption=legenda), files=dict(photo=f), timeout=120)
-        r.raise_for_status()
-    texto(msgs[1])
-    with open(imagens[2][0], 'rb') as f:
-        r = requests.post(f'{base}/sendPhoto', data=dict(chat_id=chat, caption=imagens[2][1]), files=dict(photo=f), timeout=120)
-    r.raise_for_status()
-    for m in msgs[2:]:
-        texto(m)
+    for tipo, conteudo in seq:
+        if tipo == 'texto':
+            for parte in _pedacos(conteudo):
+                r = requests.post(f'{base}/sendMessage', data=dict(chat_id=chat, text=parte, parse_mode='HTML',
+                                                                    disable_web_page_preview='true'), timeout=60)
+                r.raise_for_status()
+        else:
+            caminho, legenda = conteudo
+            with open(caminho, 'rb') as f:
+                r = requests.post(f'{base}/sendPhoto', data=dict(chat_id=chat, caption=legenda), files=dict(photo=f), timeout=120)
+            r.raise_for_status()
     for p in arquivos:
         with open(p, 'rb') as f:
             r = requests.post(f'{base}/sendDocument', data=dict(chat_id=chat, caption='Extra: abra no navegador do computador (no celular o gráfico pode não aparecer).'),
@@ -516,7 +526,7 @@ def main():
     tx, resumo, total_row, renda = ler_vendas(wv, wf)
     fluxo, pend = ler_fluxo(wv)
     ret = ler_retiradas(wv, wf)
-    D, R, msgs, O = analisar(tx, resumo, total_row, renda, fluxo, pend, ret, hoje)
+    D, R, O, ctx = analisar(tx, resumo, total_row, renda, fluxo, pend, ret, hoje)
     out = Path(os.environ.get('OUT_DIR', 'saida'))
     out.mkdir(parents=True, exist_ok=True)
     sufixo = f'{hoje:%Y-%m}'
@@ -525,13 +535,15 @@ def main():
     if R:
         arquivos.append(out / f'retiradas-{sufixo}.html')
         arquivos[1].write_text(render('retiradas.html', R))
-    imagens = oportunidades.graficos(O, out, sufixo)
-    (out / f'mensagem-{sufixo}.txt').write_text('\n\n----\n\n'.join(msgs))
-    print('\n\n----\n\n'.join(msgs))
+    imgs = oportunidades.graficos(O, out, sufixo)
+    seq = oportunidades.sequencia(O, ctx['parcial'], ctx['rotulo'], ctx['res'], ctx['top_conta'], R, brl, pct, MESES, imgs)
+    texto = '\n\n----\n\n'.join(c for t, c in seq if t == 'texto')
+    (out / f'mensagem-{sufixo}.txt').write_text(texto)
+    print(texto)
     if os.environ.get('DRY_RUN') == '1':
         print('\nDRY_RUN: nada enviado. Arquivos em', out.resolve())
         return
-    enviar_telegram(msgs, imagens, arquivos)
+    enviar_telegram(seq, arquivos)
     print('\nEnviado para o Telegram.')
 
 
