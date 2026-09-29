@@ -488,13 +488,8 @@ function parseHotelBooking(text) {
 
   const hospede = text.match(/Nome do h[óo]spede:\s*([^\n]+)/i);
   const passageiros = hospede ? [hospede[1].trim()] : [];
-  const nHosp = text.match(/N[úu]mero de h[óo]spedes:\s*(\d+)/i);
 
   const avisos = ['Reserva de HOTEL: entrada = data ida, saída = data volta. Confira o ano e a cidade.'];
-  if (nHosp && Number(nHosp[1]) > passageiros.length) {
-    avisos.push(`O PDF tem ${nHosp[1]} hóspedes mas só ${passageiros.length} nome. Use "Corrigir" para incluir os outros.`);
-  }
-
   return {
     tipo: 'hotel',
     data_ida: `${pad(ent[1])}/${pad(mIn)}/${yIn}`,
