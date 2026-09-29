@@ -321,10 +321,115 @@ function parseEticketAgencia(text) {
 }
 
 // ---------------------------------------------------------------------------
+// Formato 3: itinerário "PREPARADO PARA ... CÓDIGO DA RESERVA ... SAÍDA: DIA 07 FEV"
+// (datas sem ano: o ano vem da linha "07 FEV 2027  22 FEV 2027 VIAGEM PARA ...")
+// ---------------------------------------------------------------------------
+
+const PEQUENAS = new Set(['de', 'da', 'do', 'das', 'dos', 'e']);
+function titleCase(name) {
+  return String(name)
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w, i) => (i > 0 && PEQUENAS.has(w) ? w : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(' ');
+}
+
+function parseItinerarioReserva(text) {
+  const loc = text.match(/C[ÓO]DIGO DA RESERVA\s+([A-Z0-9]{6})\b/);
+  if (!loc || !/SA[ÍI]DA:/.test(text)) return null;
+
+  // Ano de partida (cabeçalho) e passageiros ("PREPARADO PARA")
+  const head = text.match(/(\d{2}) ([A-Z]{3}) (\d{4})/);
+  let year = head ? Number(head[3]) : new Date().getFullYear();
+  let prevMonth = head && MONTHS[head[2]] ? Number(MONTHS[head[2]]) : 0;
+
+  const passageiros = [];
+  const pp = text.match(/PREPARADO PARA\s*\n([\s\S]*?)C[ÓO]DIGO DA RESERVA/);
+  if (pp) {
+    for (const line of pp[1].split('\n')) {
+      const n = line.trim();
+      if (n && !/\d/.test(n) && !/Dist[âa]ncia/i.test(n)) passageiros.push(titleCase(n));
+    }
+  }
+
+  const segs = [];
+  const blocks = text.split(/SA[ÍI]DA:/).slice(1);
+  for (const b of blocks) {
+    const d = b.match(/^\s*[^\n]*?(\d{2})\s+([A-Z]{3})\b/);
+    const f = b.match(/([A-Z0-9]{2})\s+(\d{1,4})\s*\n?\s*Dura[cç]/);
+    const antes = b.split(/Aeronave:/)[0];
+    const codes = antes.split('\n').map((l) => l.trim()).filter((l) => /^[A-Z]{3}$/.test(l));
+    const hs = b.match(/Partindo [àa]s:\s*(\d{2}:\d{2})/);
+    const hc = b.match(/Chegando [àa]s:\s*(\d{2}:\d{2})/);
+    if (!d || !f || codes.length < 2 || !hs || !hc || !MONTHS[d[2]]) continue;
+
+    const mes = Number(MONTHS[d[2]]);
+    if (mes < prevMonth) year += 1; // virou o ano (ex.: dez -> jan)
+    prevMonth = mes;
+    const dia = d[1];
+    const dataSaida = `${dia}/${MONTHS[d[2]]}/${year}`;
+    // o PDF não traz a data de chegada: se chega "antes" de sair, foi no dia seguinte
+    let dataChegada = dataSaida;
+    if (hc[1] < hs[1]) {
+      const nx = new Date(year, mes - 1, Number(dia) + 1);
+      dataChegada = `${String(nx.getDate()).padStart(2, '0')}/${String(nx.getMonth() + 1).padStart(2, '0')}/${nx.getFullYear()}`;
+    }
+    segs.push({
+      de: codes[0],
+      dataSaida,
+      saida: hs[1],
+      para: codes[1],
+      dataChegada,
+      chegada: hc[1],
+      voo: `${f[1]}${f[2]}`
+    });
+  }
+  if (!segs.length) return null;
+
+  // Nomes no rodapé de cada trecho ("» Nome ..."), caso o cabeçalho não traga
+  if (!passageiros.length) {
+    const re = /»\s*([A-Za-zÀ-ÿ' .-]+?)(?=Check-?in|Assento|Sem\s+assento|\d|\n|$)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const n = m[1].trim();
+      if (n && !passageiros.includes(n)) passageiros.push(n);
+    }
+  }
+
+  // Ida x volta: maior pausa >= 20h entre trechos
+  let splitAt = -1;
+  let maior = 0;
+  for (let i = 0; i < segs.length - 1; i++) {
+    const pausa =
+      toDate(segs[i + 1].dataSaida, segs[i + 1].saida) - toDate(segs[i].dataChegada, segs[i].chegada);
+    if (pausa >= MIN_PAUSA_MS && pausa > maior) {
+      maior = pausa;
+      splitAt = i;
+    }
+  }
+  const ida = splitAt >= 0 ? segs.slice(0, splitAt + 1) : segs;
+  const volta = splitAt >= 0 ? segs.slice(splitAt + 1) : [];
+
+  const avisos = [];
+  const viagens =
+    1 +
+    segs.slice(0, -1).filter(
+      (s, i) =>
+        toDate(segs[i + 1].dataSaida, segs[i + 1].saida) - toDate(s.dataChegada, s.chegada) >= MIN_PAUSA_MS
+    ).length;
+  if (viagens > 2) {
+    avisos.push(`Roteiro com ${viagens} viagens separadas: separei ida/volta na maior pausa. Confira os itinerários.`);
+  }
+  if (!head) avisos.push('Este PDF não traz o ano dos voos: usei o ano atual. Confira as datas.');
+
+  return buildResult({ ida, volta, localizador: loc[1], passageiros, avisos });
+}
+
+// ---------------------------------------------------------------------------
 
 function parseFlightText(rawText) {
   const text = String(rawText || '').replace(/\r/g, '').replace(/ /g, ' ');
-  return parseEticketAgencia(text) || parseVisualizarReserva(text) || null;
+  return parseEticketAgencia(text) || parseItinerarioReserva(text) || parseVisualizarReserva(text) || null;
 }
 
 module.exports = { parseFlightText };
