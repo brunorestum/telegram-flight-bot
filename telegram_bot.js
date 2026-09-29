@@ -255,38 +255,60 @@ function toNumber(v) {
   return Number.isNaN(n) ? NaN : n;
 }
 
+// Monta os valores por NOME de coluna. Assim a ordem das colunas na planilha
+// pode mudar (ou ganhar colunas novas) sem quebrar o bot.
 function buildRow(data, today) {
   const tz = { timeZone: 'America/Sao_Paulo' };
   const dataSale = today.toLocaleDateString('pt-BR', tz); // ex: 28/09/2026
   const month = Number(today.toLocaleDateString('pt-BR', { ...tz, month: 'numeric' })); // ex: 9
-  const lucro = toNumber(data.lucro) || 0;
+  const lucro = toNumber(data.lucro) || 0; // lucro bruto informado
   const comissao = Math.round(lucro * COMISSAO * 100) / 100;
+  const lucroLiquido = Math.round((lucro - comissao) * 100) / 100; // lucro menos a comissão
   const dash = (v) => (v ? v : '-'); // na planilha, "sem volta" = "-"
   // CPF só com dígitos: apóstrofo mantém o zero à esquerda
   const cpf = /^\d+$/.test(String(data.cpf || '')) ? `'${data.cpf}` : data.cpf || '';
 
-  return [
-    dataSale, // Data de venda
-    month, // Mês (número)
-    data.conta || '', // Conta
-    data.data_ida || '', // Data da ida
-    data.horario_ida || '', // Horário da ida
-    data.itinerario_ida || '', // Itinerário da ida
-    dash(data.data_volta), // Data da volta
-    dash(data.horario_volta), // Horário da volta
-    dash(data.itinerario_volta), // Itinerário da volta
-    data.cia_aerea || '', // Cia aérea
-    data.localizador || '', // Localizador
-    cpf, // CPF
-    data.nome || '', // Nome
-    toNumber(data.valor) || 0, // Valor
-    lucro, // Lucro na operação
-    '', // Lucro não tributado (uso interno, em branco)
-    data.obs || '', // Obs
-    data.vendedor || '', // Vendedor
-    comissao, // Comissão
-    data.pagamento || '' // Pagamento
-  ];
+  return {
+    'data de venda': dataSale,
+    mes: month,
+    conta: data.conta || '',
+    'data da ida': data.data_ida || '',
+    'horario da ida': data.horario_ida || '',
+    'itinerario da ida': data.itinerario_ida || '',
+    'data da volta': dash(data.data_volta),
+    'horario da volta': dash(data.horario_volta),
+    'itinerario da volta': dash(data.itinerario_volta),
+    'cia aerea': data.cia_aerea || '',
+    localizador: data.localizador || '',
+    cpf,
+    nome: data.nome || '',
+    valor: toNumber(data.valor) || 0,
+    'base do imposto': lucro, // lucro informado (bruto)
+    'lucro na operacao': lucro, // nome antigo da mesma coluna
+    lucro: lucroLiquido, // lucro depois de descontar a comissão
+    obs: data.obs || '',
+    vendedor: data.vendedor || '',
+    comissao,
+    pagamento: data.pagamento || ''
+    // "Lucro não tributado", parcelas etc. ficam em branco
+  };
+}
+
+const norm = (h) =>
+  String(h || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+
+function colLetter(n) {
+  let s = '';
+  while (n > 0) {
+    const r = (n - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
 }
 
 // Recebe uma LISTA de vendas (1 por passageiro) e adiciona todas de uma vez
@@ -301,8 +323,6 @@ async function fillGoogleSheet(list) {
     const sheets = google.sheets({ version: 'v4', auth });
 
     const today = new Date();
-    const values = list.map((d) => buildRow(d, today));
-
     // A aba tem tabelas de resumo logo abaixo dos dados: em vez de "append"
     // (que poderia escrever por cima), inserimos linhas novas depois da
     // última venda e gravamos nelas.
@@ -325,6 +345,20 @@ async function fillGoogleSheet(list) {
     while (last + 1 < a.length && a[last + 1] !== '') last += 1;
     const firstNew = last + 1; // índice base 0 da primeira linha nova
 
+    // Cabeçalho real da planilha: cada valor vai na coluna de mesmo nome
+    const hdr = await sheets.spreadsheets.values.get({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: `${GOOGLE_SHEET_NAME}!${header + 1}:${header + 1}`
+    });
+    const cols = ((hdr.data.values || [[]])[0] || []).map(norm);
+    const values = list.map((d) => {
+      const m = buildRow(d, today);
+      return cols.map((c) => (c in m ? m[c] : ''));
+    });
+    const lastCol = colLetter(cols.length);
+    const faltando = ['data de venda', 'nome', 'comissao'].filter((c) => !cols.includes(c));
+    if (faltando.length) throw new Error('Colunas não encontradas no cabeçalho: ' + faltando.join(', '));
+
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: GOOGLE_SHEET_ID,
       resource: {
@@ -341,7 +375,7 @@ async function fillGoogleSheet(list) {
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: GOOGLE_SHEET_ID,
-      range: `${GOOGLE_SHEET_NAME}!A${firstNew + 1}:T${firstNew + values.length}`,
+      range: `${GOOGLE_SHEET_NAME}!A${firstNew + 1}:${lastCol}${firstNew + values.length}`,
       valueInputOption: 'USER_ENTERED',
       resource: { values }
     });
