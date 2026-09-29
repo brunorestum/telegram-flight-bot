@@ -22,6 +22,7 @@ const FREELLMAPI_URL = process.env.FREELLMAPI_URL || 'http://localhost:3002';
 const FREELLMAPI_KEY = process.env.FREELLMAPI_KEY;
 const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_SHEET_NAME = process.env.GOOGLE_SHEET_NAME || 'Vendas';
+const COMISSAO = (Number(process.env.COMISSAO_PERCENT) || 20) / 100;
 
 if (!BOT_TOKEN) {
   console.error('❌ TELEGRAM_BOT_TOKEN não configurado!');
@@ -255,31 +256,35 @@ function toNumber(v) {
 }
 
 function buildRow(data, today) {
-  const dataSale = today.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
-  const month = today.toLocaleString('pt-BR', { month: 'long', timeZone: 'America/Sao_Paulo' });
+  const tz = { timeZone: 'America/Sao_Paulo' };
+  const dataSale = today.toLocaleDateString('pt-BR', tz); // ex: 28/09/2026
+  const month = Number(today.toLocaleDateString('pt-BR', { ...tz, month: 'numeric' })); // ex: 9
   const lucro = toNumber(data.lucro) || 0;
-  const comissao = lucro * 0.2;
+  const comissao = Math.round(lucro * COMISSAO * 100) / 100;
+  const dash = (v) => (v ? v : '-'); // na planilha, "sem volta" = "-"
+  // CPF só com dígitos: apóstrofo mantém o zero à esquerda
+  const cpf = /^\d+$/.test(String(data.cpf || '')) ? `'${data.cpf}` : data.cpf || '';
 
   return [
     dataSale, // Data de venda
-    month, // Mês
+    month, // Mês (número)
     data.conta || '', // Conta
     data.data_ida || '', // Data da ida
     data.horario_ida || '', // Horário da ida
     data.itinerario_ida || '', // Itinerário da ida
-    data.data_volta || '', // Data da volta
-    data.horario_volta || '', // Horário da volta
-    data.itinerario_volta || '', // Itinerário da volta
+    dash(data.data_volta), // Data da volta
+    dash(data.horario_volta), // Horário da volta
+    dash(data.itinerario_volta), // Itinerário da volta
     data.cia_aerea || '', // Cia aérea
     data.localizador || '', // Localizador
-    data.cpf || '', // CPF
+    cpf, // CPF
     data.nome || '', // Nome
     toNumber(data.valor) || 0, // Valor
     lucro, // Lucro na operação
-    '', // Lucro não tributado (deixado em branco: uso interno)
+    '', // Lucro não tributado (uso interno, em branco)
     data.obs || '', // Obs
     data.vendedor || '', // Vendedor
-    comissao, // Comissão (20% do lucro)
+    comissao, // Comissão
     data.pagamento || '' // Pagamento
   ];
 }
@@ -298,9 +303,45 @@ async function fillGoogleSheet(list) {
     const today = new Date();
     const values = list.map((d) => buildRow(d, today));
 
-    await sheets.spreadsheets.values.append({
+    // A aba tem tabelas de resumo logo abaixo dos dados: em vez de "append"
+    // (que poderia escrever por cima), inserimos linhas novas depois da
+    // última venda e gravamos nelas.
+    const meta = await sheets.spreadsheets.get({
       spreadsheetId: GOOGLE_SHEET_ID,
-      range: `${GOOGLE_SHEET_NAME}!A:T`,
+      fields: 'sheets.properties(sheetId,title)'
+    });
+    const aba = meta.data.sheets.find((x) => x.properties.title === GOOGLE_SHEET_NAME);
+    if (!aba) throw new Error(`Aba "${GOOGLE_SHEET_NAME}" não encontrada na planilha`);
+    const sheetId = aba.properties.sheetId;
+
+    const colA = await sheets.spreadsheets.values.get({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: `${GOOGLE_SHEET_NAME}!A:A`
+    });
+    const a = (colA.data.values || []).map((r) => (r[0] || '').toString().trim());
+    let header = a.findIndex((v) => v.toLowerCase() === 'data de venda');
+    if (header < 0) throw new Error('Cabeçalho "Data de venda" não encontrado na coluna A');
+    let last = header; // índice (base 0) da última linha de dados
+    while (last + 1 < a.length && a[last + 1] !== '') last += 1;
+    const firstNew = last + 1; // índice base 0 da primeira linha nova
+
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      resource: {
+        requests: [
+          {
+            insertDimension: {
+              range: { sheetId, dimension: 'ROWS', startIndex: firstNew, endIndex: firstNew + values.length },
+              inheritFromBefore: true
+            }
+          }
+        ]
+      }
+    });
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: `${GOOGLE_SHEET_NAME}!A${firstNew + 1}:T${firstNew + values.length}`,
       valueInputOption: 'USER_ENTERED',
       resource: { values }
     });
@@ -511,30 +552,31 @@ bot.on('text', async (ctx) => {
   }
   if (state.step === 'pax_cpf') {
     state.current.cpf = text;
-    state.step = 'pax_valor';
-    ctx.reply('💰 Valor da passagem?');
-    return;
-  }
-  if (state.step === 'pax_valor' || state.step === 'pax_lucro') {
-    const n = toNumber(text);
-    if (Number.isNaN(n)) {
-      ctx.reply('⚠️ Não entendi esse número. Ex: 1250 ou 1.250,50');
-      return;
-    }
-    if (state.step === 'pax_valor') {
-      state.current.valor = n;
-      state.step = 'pax_lucro';
-      ctx.reply('📈 Lucro na operação?');
-      return;
-    }
-    state.current.lucro = n;
     state.paxData.push(state.current);
     state.paxIndex += 1;
     if (state.paxIndex < state.passengers.length) {
       startPassenger(ctx, state);
     } else {
-      await finalizeSale(ctx, userId, state);
+      state.step = 'res_valor';
+      ctx.reply('💰 Valor total da reserva?');
     }
+    return;
+  }
+  // Valor e lucro: UMA vez por reserva (vão na 1ª linha; as demais ficam com 0)
+  if (state.step === 'res_valor' || state.step === 'res_lucro') {
+    const n = toNumber(text);
+    if (Number.isNaN(n)) {
+      ctx.reply('⚠️ Não entendi esse número. Ex: 1250 ou 1.250,50');
+      return;
+    }
+    if (state.step === 'res_valor') {
+      state.shared.valor = n;
+      state.step = 'res_lucro';
+      ctx.reply('📈 Lucro na operação (total da reserva)?');
+      return;
+    }
+    state.shared.lucro = n;
+    await finalizeSale(ctx, userId, state);
     return;
   }
 
@@ -551,22 +593,22 @@ async function finalizeSale(ctx, userId, state) {
   try {
     ctx.reply('💾 Preenchendo Google Sheets...');
 
-    const rows = state.paxData.map((pax) => ({
+    const rows = state.paxData.map((pax, i) => ({
       ...state.flightData,
       ...state.shared,
-      ...pax
+      ...pax,
+      // valor/lucro só na 1ª linha da reserva; demais passageiros = 0
+      valor: i === 0 ? state.shared.valor : 0,
+      lucro: i === 0 ? state.shared.lucro : 0
     }));
 
     await fillGoogleSheet(rows);
 
-    const linhas = rows
-      .map((r) => `• ${r.nome}: comissão R$ ${(toNumber(r.lucro) * 0.2).toFixed(2)}`)
-      .join('\n');
-    const total = rows.reduce((s, r) => s + toNumber(r.lucro) * 0.2, 0).toFixed(2);
-
+    const comissao = (toNumber(state.shared.lucro) || 0) * COMISSAO;
     ctx.reply(
-      `✅ ${rows.length} linha(s) registrada(s)!\n\n${linhas}\n\n` +
-      `💰 Comissão total: R$ ${total}`
+      `✅ ${rows.length} linha(s) registrada(s)!\n\n` +
+      `${rows.map((r) => '• ' + r.nome).join('\n')}\n\n` +
+      `💰 Comissão (${Math.round(COMISSAO * 100)}%): R$ ${comissao.toFixed(2)}`
     );
 
     userState.delete(userId);
