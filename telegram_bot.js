@@ -298,6 +298,7 @@ const norm = (h) =>
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
+    .replace(/\s+/g, ' ')
     .trim();
 
 function colLetter(n) {
@@ -310,16 +311,20 @@ function colLetter(n) {
   return s;
 }
 
+function getSheets() {
+  const auth = new google.auth.GoogleAuth({
+    ...(process.env.GOOGLE_CREDENTIALS_JSON
+      ? { credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON) }
+      : { keyFile: process.env.GOOGLE_CREDENTIALS_FILE || './google-credentials.json' }),
+    scopes: ['https://www.googleapis.com/auth/spreadsheets']
+  });
+  return google.sheets({ version: 'v4', auth });
+}
+
 // Recebe uma LISTA de vendas (1 por passageiro) e adiciona todas de uma vez
 async function fillGoogleSheet(list) {
   try {
-    const auth = new google.auth.GoogleAuth({
-      ...(process.env.GOOGLE_CREDENTIALS_JSON
-        ? { credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON) }
-        : { keyFile: process.env.GOOGLE_CREDENTIALS_FILE || './google-credentials.json' }),
-      scopes: ['https://www.googleapis.com/auth/spreadsheets']
-    });
-    const sheets = google.sheets({ version: 'v4', auth });
+    const sheets = getSheets();
 
     const today = new Date();
     // A aba tem tabelas de resumo logo abaixo dos dados: em vez de "append"
@@ -393,6 +398,173 @@ async function fillGoogleSheet(list) {
     console.error('❌ Erro ao preencher Google Sheets:', error.message);
     throw error;
   }
+}
+
+
+// ---------------------------------------------------------------------------
+// PLANILHA DA MARIANA (só quando o vendedor for a Mariana)
+// ---------------------------------------------------------------------------
+
+const MARIANA_SHEET_ID = process.env.MARIANA_SHEET_ID;
+const MARIANA_SHEET_NAME = process.env.MARIANA_SHEET_NAME || 'Passagens 2026';
+
+const isMariana = (v) => norm(v).includes('mariana');
+
+const MESES_MAIUSC = [
+  'JANEIRO', 'FEVEREIRO', 'MARÇO', 'ABRIL', 'MAIO', 'JUNHO',
+  'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO'
+];
+
+// CPF com pontuação, como na planilha dela: 000.000.000-00
+function formatCpf(v) {
+  const d = String(v || '').replace(/\D/g, '');
+  if (d.length === 11) return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
+  return v || '';
+}
+
+function buildMarianaRow(data, today, primeira) {
+  const m = buildRow(data, today);
+  const lucro = toNumber(data.lucro) || 0;
+  const custo = data.custo == null ? null : toNumber(data.custo);
+  return {
+    'data de venda': m['data de venda'],
+    mes: m.mes,
+    conta: m.conta,
+    'data da ida': m['data da ida'],
+    'horario da ida': m['horario da ida'],
+    'itinerario da ida': m['itinerario da ida'],
+    'data da volta': m['data da volta'],
+    'horario da volta': m['horario da volta'],
+    'itinerario da volta': m['itinerario da volta'],
+    'cia aerea': m['cia aerea'],
+    localizador: m.localizador,
+    cpf: formatCpf(data.cpf),
+    nome: m.nome,
+    'valor de venda': m.valor,
+    custo: primeira ? (custo == null ? '-' : custo) : 0,
+    lucro,
+    comissao: m.comissao,
+    'forma de pagamento': m.pagamento,
+    obs: m.obs
+  };
+}
+
+async function fillMarianaSheet(list) {
+  if (!MARIANA_SHEET_ID) throw new Error('MARIANA_SHEET_ID não configurado no Render');
+  const sheets = getSheets();
+  const today = new Date();
+
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId: MARIANA_SHEET_ID,
+    fields: 'sheets.properties(sheetId,title,gridProperties(rowCount))'
+  });
+  const aba = meta.data.sheets.find((x) => x.properties.title === MARIANA_SHEET_NAME);
+  if (!aba) throw new Error(`Aba "${MARIANA_SHEET_NAME}" não encontrada na planilha da Mariana`);
+  const sheetId = aba.properties.sheetId;
+  const rowCount = aba.properties.gridProperties.rowCount;
+
+  // Colunas A e B (data e mês) e o cabeçalho
+  const ab = await sheets.spreadsheets.values.get({
+    spreadsheetId: MARIANA_SHEET_ID,
+    range: `${MARIANA_SHEET_NAME}!A:B`
+  });
+  const ab_rows = ab.data.values || [];
+  const hdr = await sheets.spreadsheets.values.get({
+    spreadsheetId: MARIANA_SHEET_ID,
+    range: `${MARIANA_SHEET_NAME}!1:1`
+  });
+  const cols = ((hdr.data.values || [[]])[0] || []).map(norm);
+  if (!cols[0]) cols[0] = 'data de venda'; // a coluna A não tem título na planilha dela
+  if (!cols.includes('custo') || !cols.includes('comissao')) {
+    throw new Error('Cabeçalho da planilha da Mariana não reconhecido (esperava Custo e Comissão)');
+  }
+
+  // Última linha com algo na coluna A (venda ou título de mês)
+  let last = -1;
+  ab_rows.forEach((r, i) => {
+    if ((r[0] || '').toString().trim() !== '') last = i;
+  });
+  if (last < 1) throw new Error('Não achei vendas na planilha da Mariana');
+
+  // Mês da última venda (coluna B numérica); se mudou o mês, escreve o título do mês
+  let lastMonth = null;
+  for (let i = last; i >= 1; i--) {
+    const b = (ab_rows[i] || [])[1];
+    if (b !== undefined && /^\d+$/.test(String(b).trim())) {
+      lastMonth = Number(b);
+      break;
+    }
+  }
+  const mesAtual = Number(today.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo', month: 'numeric' }));
+  const precisaTitulo = lastMonth !== mesAtual;
+
+  const values = list.map((d, i) => {
+    const m = buildMarianaRow(d, today, i === 0);
+    // null = não mexe na célula (ex.: caixinha de seleção, "Preferência")
+    return cols.map((c) => (c in m ? m[c] : null));
+  });
+  const lastIdx = values.reduce((mx, r) => {
+    let k = r.length - 1;
+    while (k >= 0 && r[k] === null) k--;
+    return Math.max(mx, k);
+  }, 0);
+  const trimmed = values.map((r) => r.slice(0, lastIdx + 1));
+  const lastCol = colLetter(lastIdx + 1);
+
+  const linhas = (precisaTitulo ? 1 : 0) + trimmed.length;
+  let start = last + 1; // índice base 0 da 1ª linha livre
+  // garante que existam linhas suficientes na aba
+  if (start + linhas > rowCount) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: MARIANA_SHEET_ID,
+      resource: {
+        requests: [{ appendDimension: { sheetId, dimension: 'ROWS', length: start + linhas - rowCount } }]
+      }
+    });
+  }
+
+  if (precisaTitulo) {
+    // acha um título de mês anterior para copiar a formatação
+    let tituloIdx = -1;
+    for (let i = last; i >= 1; i--) {
+      const r = ab_rows[i] || [];
+      if ((r[0] || '') !== '' && !/^\d/.test(String(r[0])) && !(r[1] || '').toString().trim()) {
+        tituloIdx = i;
+        break;
+      }
+    }
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: MARIANA_SHEET_ID,
+      range: `${MARIANA_SHEET_NAME}!A${start + 1}`,
+      valueInputOption: 'USER_ENTERED',
+      resource: { values: [[MESES_MAIUSC[mesAtual - 1]]] }
+    });
+    if (tituloIdx >= 0) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: MARIANA_SHEET_ID,
+        resource: {
+          requests: [
+            {
+              copyPaste: {
+                source: { sheetId, startRowIndex: tituloIdx, endRowIndex: tituloIdx + 1, startColumnIndex: 0, endColumnIndex: lastIdx + 1 },
+                destination: { sheetId, startRowIndex: start, endRowIndex: start + 1, startColumnIndex: 0, endColumnIndex: lastIdx + 1 },
+                pasteType: 'PASTE_FORMAT'
+              }
+            }
+          ]
+        }
+      });
+    }
+    start += 1;
+  }
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: MARIANA_SHEET_ID,
+    range: `${MARIANA_SHEET_NAME}!A${start + 1}:${lastCol}${start + trimmed.length}`,
+    valueInputOption: 'USER_ENTERED',
+    resource: { values: trimmed }
+  });
+  return true;
 }
 
 // ============================================================================
@@ -497,6 +669,51 @@ bot.action('flight_ok', async (ctx) => {
   state.step = 'asking_account';
   ctx.reply('💼 Qual é a conta?');
 });
+
+
+// Lucro ou custo?
+bot.action('modo_lucro', async (ctx) => {
+  const state = initUserState(ctx.from.id);
+  await ctx.answerCbQuery();
+  if (state.step !== 'res_modo') return;
+  state.step = 'res_lucro';
+  ctx.reply('📈 Lucro na operação (total da reserva)?');
+});
+
+bot.action('modo_custo', async (ctx) => {
+  const state = initUserState(ctx.from.id);
+  await ctx.answerCbQuery();
+  if (state.step !== 'res_modo') return;
+  state.step = 'res_custo';
+  ctx.reply('🧾 Custo total da reserva?');
+});
+
+bot.action('liq_sim', async (ctx) => {
+  const state = initUserState(ctx.from.id);
+  await ctx.answerCbQuery();
+  if (state.step !== 'res_liquido_igual') return;
+  state.shared.liquido = state.shared.valor;
+  await concluirCusto(ctx, ctx.from.id, state);
+});
+
+bot.action('liq_nao', async (ctx) => {
+  const state = initUserState(ctx.from.id);
+  await ctx.answerCbQuery();
+  if (state.step !== 'res_liquido_igual') return;
+  state.step = 'res_liquido';
+  ctx.reply('💵 Qual é o valor líquido de venda?');
+});
+
+// lucro = valor líquido de venda - custo
+async function concluirCusto(ctx, userId, state) {
+  const lucro = Math.round((state.shared.liquido - state.shared.custo) * 100) / 100;
+  state.shared.lucro = lucro;
+  ctx.reply(
+    `🧮 Lucro = R$ ${state.shared.liquido.toFixed(2)} − R$ ${state.shared.custo.toFixed(2)} = R$ ${lucro.toFixed(2)}` +
+      (lucro < 0 ? '\n⚠️ O lucro ficou negativo. Se estiver errado, envie /restart.' : '')
+  );
+  await finalizeSale(ctx, userId, state);
+}
 
 bot.action('flight_edit', async (ctx) => {
   const state = initUserState(ctx.from.id);
@@ -604,8 +821,10 @@ bot.on('text', async (ctx) => {
     }
     return;
   }
-  // Valor e lucro: UMA vez por reserva (vão na 1ª linha; as demais ficam com 0)
-  if (state.step === 'res_valor' || state.step === 'res_lucro') {
+  // Valor total, e depois lucro OU custo: UMA vez por reserva
+  // (vão na 1ª linha; as demais ficam com 0)
+  const numSteps = ['res_valor', 'res_lucro', 'res_custo', 'res_liquido'];
+  if (numSteps.includes(state.step)) {
     const n = toNumber(text);
     if (Number.isNaN(n)) {
       ctx.reply('⚠️ Não entendi esse número. Ex: 1250 ou 1.250,50');
@@ -613,13 +832,43 @@ bot.on('text', async (ctx) => {
     }
     if (state.step === 'res_valor') {
       state.shared.valor = n;
-      state.step = 'res_lucro';
-      ctx.reply('📈 Lucro na operação (total da reserva)?');
+      state.step = 'res_modo';
+      ctx.reply(
+        'Você vai informar o lucro ou o custo?',
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback('📈 Lucro', 'modo_lucro'),
+            Markup.button.callback('🧾 Custo', 'modo_custo')
+          ]
+        ])
+      );
       return;
     }
-    state.shared.lucro = n;
-    await finalizeSale(ctx, userId, state);
-    return;
+    if (state.step === 'res_lucro') {
+      state.shared.lucro = n;
+      state.shared.custo = null;
+      await finalizeSale(ctx, userId, state);
+      return;
+    }
+    if (state.step === 'res_custo') {
+      state.shared.custo = n;
+      state.step = 'res_liquido_igual';
+      ctx.reply(
+        `O valor total da reserva (R$ ${state.shared.valor.toFixed(2)}) é igual ao valor líquido de venda?`,
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback('✅ Sim, é igual', 'liq_sim'),
+            Markup.button.callback('❌ Não', 'liq_nao')
+          ]
+        ])
+      );
+      return;
+    }
+    if (state.step === 'res_liquido') {
+      state.shared.liquido = n;
+      await concluirCusto(ctx, userId, state);
+      return;
+    }
   }
 
   if (state.step === 'waiting_pdf') {
@@ -633,23 +882,46 @@ bot.on('text', async (ctx) => {
 
 async function finalizeSale(ctx, userId, state) {
   try {
-    ctx.reply('💾 Preenchendo Google Sheets...');
-
     const rows = state.paxData.map((pax, i) => ({
       ...state.flightData,
       ...state.shared,
       ...pax,
-      // valor/lucro só na 1ª linha da reserva; demais passageiros = 0
+      // valor/lucro/custo só na 1ª linha da reserva; demais passageiros = 0
       valor: i === 0 ? state.shared.valor : 0,
-      lucro: i === 0 ? state.shared.lucro : 0
+      lucro: i === 0 ? state.shared.lucro : 0,
+      custo: i === 0 ? state.shared.custo : 0
     }));
 
-    await fillGoogleSheet(rows);
+    const paraMariana = isMariana(state.shared.vendedor);
+    ctx.reply(paraMariana ? '💾 Preenchendo as 2 planilhas...' : '💾 Preenchendo Google Sheets...');
+
+    // Cada planilha é gravada uma única vez, mesmo que um /retry seja necessário
+    let falha = null;
+    if (!state.savedMain) {
+      try {
+        await fillGoogleSheet(rows);
+        state.savedMain = true;
+      } catch (e) {
+        console.error(e);
+        falha = `planilha principal: ${e.message}`;
+      }
+    }
+    if (paraMariana && !state.savedMariana) {
+      try {
+        await fillMarianaSheet(rows);
+        state.savedMariana = true;
+      } catch (e) {
+        console.error(e);
+        falha = (falha ? falha + ' | ' : '') + `planilha da Mariana: ${e.message}`;
+      }
+    }
+    if (falha) throw new Error(falha);
 
     const comissao = (toNumber(state.shared.lucro) || 0) * COMISSAO;
     ctx.reply(
-      `✅ ${rows.length} linha(s) registrada(s)!\n\n` +
+      `✅ ${rows.length} linha(s) registrada(s)${paraMariana ? ' nas 2 planilhas' : ''}!\n\n` +
       `${rows.map((r) => '• ' + r.nome).join('\n')}\n\n` +
+      `📈 Lucro: R$ ${(toNumber(state.shared.lucro) || 0).toFixed(2)}\n` +
       `💰 Comissão (${Math.round(COMISSAO * 100)}%): R$ ${comissao.toFixed(2)}`
     );
 
@@ -660,8 +932,10 @@ async function finalizeSale(ctx, userId, state) {
     console.error(error);
     // Mantém tudo que foi digitado: dá para tentar de novo sem perder nada
     state.step = 'waiting_retry';
+    const jaSalvo = [state.savedMain && 'principal', state.savedMariana && 'Mariana'].filter(Boolean);
     ctx.reply(
-      `❌ Não consegui salvar na planilha: ${error.message}\n\n` +
+      `❌ Não consegui salvar: ${error.message}\n\n` +
+      (jaSalvo.length ? `✔️ Já salvo na(s) planilha(s): ${jaSalvo.join(', ')} (não vai duplicar).\n` : '') +
       `Seus dados foram guardados. Envie /retry para tentar de novo ou /restart para descartar.`
     );
   }
