@@ -11,8 +11,6 @@ Variáveis de ambiente:
   GOOGLE_CREDENTIALS_JSON       JSON da conta de serviço (o mesmo do bot)
   TELEGRAM_BOT_TOKEN            token do bot
   TELEGRAM_CHAT_ID              chat que recebe o relatório
-  SALDO_10X_PIX                 opcional: saldo a receber do 10x pix (ex.: 38870.27)
-  SALDO_10X_PIX_DATA            opcional: data desse saldo (dd/mm/aaaa)
   REF_MES                       opcional: último mês analisado (1-12). Padrão: mês
                                 anterior se hoje é dia 1 a 3, senão o mês atual (parcial)
   LOCAL_XLSX                    opcional: usa um .xlsx local em vez do Google (teste)
@@ -282,11 +280,6 @@ def analisar(tx, resumo, total_row, renda, fluxo, pend_fluxo, ret, hoje):
     mg = lambda g: sum(t['base'] for t in g) / sum(t['valor'] for t in g) if g else 0
     Vc = sum(t['valor'] for t in cartao)
     sem_pag = [t for t in vend if not t['pag']]
-    p10 = [t for t in vend if '10x pix' in t['pag'].lower()]
-    V10 = sum(t['valor'] for t in p10)
-    saldo10 = os.environ.get('SALDO_10X_PIX')
-    saldo10 = num(saldo10.replace('.', ',') if saldo10 and '.' in saldo10 and ',' not in saldo10 else saldo10) if saldo10 else None
-    saldo10_data = os.environ.get('SALDO_10X_PIX_DATA', '')
     pdd = S('pdd')
     res, rec, fixo, com = S('resultado'), S('receita'), S('fixo'), S('com')
     pessoas = S('sal') + com
@@ -305,15 +298,12 @@ def analisar(tx, resumo, total_row, renda, fluxo, pend_fluxo, ret, hoje):
         f'O custo fixo foi de {brl(ini["fixo"])} ({ini["label"]}) para {brl(fim["fixo"])} ({rotulo_fim}). '
         f'Hoje ele come {pct(fim["fixo"] / fim["receita"], 0)} do que a agência ganha no mês, contra {pct(ini["fixo"] / ini["receita"], 0)} em {ini["label"]}. '
         f'Salários e comissões são {pct(pessoas / (fixo + com), 0)} de todos os custos, então o lucro depende quase só de vender mais com a mesma equipe.'))
-    txt_saldo = (f' Ainda faltam receber <b>{brl(saldo10)}</b>' + (f' (saldo de {saldo10_data})' if saldo10_data else '')
-                 + f', o que equivale a {pct(saldo10 / res, 0)} de todo o lucro do período.') if saldo10 else ' O saldo que falta receber não está na planilha.'
     meses_sem = sorted({MESES[t['mes'] - 1] for t in sem_pag})
-    riscos.append(((f'{len(sem_pag)} vendas sem pagamento anotado ({brl(sum(t["valor"] for t in sem_pag))})' if sem_pag else 'vendas parceladas no pix')
-                   + (f'; {brl(saldo10)} a receber do 10x pix' if saldo10 else ''),
-        'Dinheiro a receber',
-        (f'{len(sem_pag)} vendas ({brl(sum(t["valor"] for t in sem_pag))}, de {", ".join(meses_sem)}) estão sem forma de pagamento anotada. ' if sem_pag else '')
-        + f'Você vendeu {brl(V10)} em 10x no pix, ou seja, a agência está financiando o cliente.{txt_saldo}'
-        + (f' Já houve {brl(pdd)} de PDD e Justiça.' if pdd else '')))
+    if sem_pag or pdd:
+        riscos.append(((f'{len(sem_pag)} vendas sem pagamento anotado ({brl(sum(t["valor"] for t in sem_pag))})' if sem_pag else f'{brl(pdd)} de PDD e Justiça no período'),
+            'Dinheiro a receber',
+            (f'{len(sem_pag)} vendas ({brl(sum(t["valor"] for t in sem_pag))}, de {", ".join(meses_sem)}) estão sem forma de pagamento anotada.' if sem_pag else '')
+            + (f' Já houve {brl(pdd)} de PDD e Justiça.' if pdd else '')))
     riscos.append((f'maior cliente = {pct(top_cli[1][1] / T)} do lucro; conta "{top_conta[0].title()}" = {pct(top_conta[1][1] / T)}',
         'Dependência de um cliente e de uma conta de emissão',
         f'O maior cliente ({"CNPJ " if "/" in top_cli[0] else "CPF "}{mascara(top_cli[0])}) gera {pct(top_cli[1][1] / T)} do lucro. '
@@ -338,10 +328,6 @@ def analisar(tx, resumo, total_row, renda, fluxo, pend_fluxo, ret, hoje):
     melhorias.append(dict(o=f'Diminuir a dependência do maior cliente e da conta "{top_conta[0].title()}"',
         p='Contrato com prazo e condições para o cliente principal. Ter uma segunda conta ou fornecedor pronto para emitir as mesmas rotas.',
         i=f'{brl(top_cli[1][1])} (cliente) e {brl(top_conta[1][1])} (conta) de lucro exposto', t='real', e='Médio', v=top_cli[1][1]))
-    melhorias.append(dict(o='Colocar regras no 10x pix (entrada mínima, limite por cliente, contrato)',
-        p='Você está fazendo o papel de banco, sem juros e com risco de calote.',
-        i=(f'{brl(saldo10)} ainda a receber' if saldo10 else f'{brl(V10)} vendidos (saldo não informado)'), t='real', e='Médio',
-        v=saldo10 or 0))
     if contas_delta > 0:
         melhorias.append(dict(o='Revisar as contas fixas pequenas ("contas" e "sistema")',
             p=f'Subiram {brl(contas_delta)}/mês desde {ini["label"]}. Confira se cada uma ainda se paga.',
@@ -496,8 +482,6 @@ def mensagem(D, R, M, riscos, melhorias, res, rec, rotulo_fim, parcial, ano, ref
         f'{i + 1}. {m["o"]}: {m["i"]}{" (estimativa)" if m["t"] == "est" else ""}' for i, m in enumerate(melhorias[:3])]
     if R:
         linhas += ['', f'<b>Suas retiradas:</b> {brl(R["ret"])} no ano, contra um direito de {brl(R["dir"])}. Saldo acumulado: {brl(R["fim"])}.']
-    if not os.environ.get('SALDO_10X_PIX'):
-        linhas += ['', 'Falta o saldo do 10x pix: me mande o valor atualizado.']
     linhas += ['', 'Os painéis completos vão em anexo (abra no navegador).',
                '<i>Análise para você decidir. Não é recomendação de investimento.</i>']
     return '\n'.join(linhas)

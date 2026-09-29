@@ -39,8 +39,6 @@ Render → **New → Cron Job** → escolha o repositório `telegram-flight-bot`
 | `GOOGLE_CREDENTIALS_JSON` | o mesmo do bot (o JSON inteiro) |
 | `GOOGLE_SHEET_ID` | o mesmo do bot (id da "Futuro 2026") |
 | `TELEGRAM_CHAT_ID` | o número do passo 2 |
-| `SALDO_10X_PIX` | saldo a receber do 10x pix, ex.: `38870.27` |
-| `SALDO_10X_PIX_DATA` | data desse saldo, ex.: `29/09/2026` |
 
 Dica: no Render, dá para criar um **Environment Group** com as 3 primeiras variáveis e ligar ao bot e ao Cron Job. Assim, quando o token mudar, você troca num lugar só.
 
@@ -48,7 +46,6 @@ Dica: no Render, dá para criar um **Environment Group** com as 3 primeiras vari
 Na página do Cron Job, clique em **Trigger Run**. Se a data não for dia 1, 2 ou 3, ele analisa o mês atual como **parcial**. Em um ou dois minutos, a mensagem e os dois painéis chegam no seu Telegram.
 
 ## Todo mês
-- Antes do dia 1, atualize `SALDO_10X_PIX` e `SALDO_10X_PIX_DATA` no Render. Esse saldo não está na planilha. Se não atualizar, a mensagem avisa.
 - Em janeiro de 2027: a execução de 01/01/2027 ainda analisa dezembro de 2026. Depois dela, troque `GOOGLE_SHEET_ID` para a planilha "Futuro 2027".
 
 ## Se der erro
