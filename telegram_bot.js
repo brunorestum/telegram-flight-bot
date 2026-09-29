@@ -263,7 +263,6 @@ function buildRow(data, today) {
   const month = Number(today.toLocaleDateString('pt-BR', { ...tz, month: 'numeric' })); // ex: 9
   const lucro = toNumber(data.lucro) || 0; // lucro bruto informado
   const comissao = Math.round(lucro * COMISSAO * 100) / 100;
-  const lucroLiquido = Math.round((lucro - comissao) * 100) / 100; // lucro menos a comissão
   const dash = (v) => (v ? v : '-'); // na planilha, "sem volta" = "-"
   // CPF só com dígitos: apóstrofo mantém o zero à esquerda
   const cpf = /^\d+$/.test(String(data.cpf || '')) ? `'${data.cpf}` : data.cpf || '';
@@ -283,14 +282,13 @@ function buildRow(data, today) {
     cpf,
     nome: data.nome || '',
     valor: toNumber(data.valor) || 0,
-    'base do imposto': lucro, // lucro informado (bruto)
+    lucro, // lucro informado (o "Base do imposto" é fórmula da planilha, não é escrito aqui)
     'lucro na operacao': lucro, // nome antigo da mesma coluna
-    lucro: lucroLiquido, // lucro depois de descontar a comissão
     obs: data.obs || '',
     vendedor: data.vendedor || '',
     comissao,
     pagamento: data.pagamento || ''
-    // "Lucro não tributado", parcelas etc. ficam em branco
+    // "Base do imposto", "Lucro não tributado", parcelas etc. ficam em branco
   };
 }
 
@@ -379,6 +377,37 @@ async function fillGoogleSheet(list) {
       valueInputOption: 'USER_ENTERED',
       resource: { values }
     });
+
+    // "Base do imposto" é fórmula: copia a fórmula da última venda para as linhas novas
+    const cBase = cols.indexOf('base do imposto');
+    if (cBase >= 0 && last > header) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: GOOGLE_SHEET_ID,
+        resource: {
+          requests: [
+            {
+              copyPaste: {
+                source: {
+                  sheetId,
+                  startRowIndex: last,
+                  endRowIndex: last + 1,
+                  startColumnIndex: cBase,
+                  endColumnIndex: cBase + 1
+                },
+                destination: {
+                  sheetId,
+                  startRowIndex: firstNew,
+                  endRowIndex: firstNew + values.length,
+                  startColumnIndex: cBase,
+                  endColumnIndex: cBase + 1
+                },
+                pasteType: 'PASTE_FORMULA'
+              }
+            }
+          ]
+        }
+      });
+    }
 
     return true;
   } catch (error) {
