@@ -9,14 +9,20 @@ Nacional x internacional vem do destino (aeroportos do itinerário), e não da c
 """
 import collections
 import html
+import json
 import re
 import statistics
+from pathlib import Path
 
 AEROPORTOS_BR = set(
     'GIG SDU GRU CGH VCP BSB CNF PLU POA FLN CWB VIX SSA REC FOR NAT MCZ AJU JPA SLZ THE BEL MAO CGB CGR GYN BPS IOS '
     'NVT JOI IGU FOZ LDB MGF UDI RAO SJK VDC CXJ PMW PVH RBR BVB MCP STM MAB IMP PNZ JDO CPV JJD LEC FEN RIO SAO JPR '
     'PET CKS ARU MOC IZA GVR UBA UNA CAW BGX CFB BAU AAX JCB CLV GEL ATM BJP SOD QSC ERM OAL FRC GPB JCM CIZ'.split())
 CONSOLIDADORAS_RE = re.compile(r'ancorad\w*|kg\s*travel', re.I)
+# Contas que NÃO são milhas: compra direto no site da cia, plataformas, hotéis e balcão. O restante (contas com nome de
+# pessoa e programas como Smiles/Azul/Latam) é emissão em milhas.
+SITE_RE = re.compile(r'site|pagante|expedi|taap|hotel|garden|turismo|seguro|coris|emirates|air france|qtar|qatar|^ita$|^tap$|'
+                     r'avianca|thai|copa|easyjet|aerolineas|phillipine|cebu|american airlines|^aa (site|altera)|iberia|united|balc[aã]o|consultoria', re.I)
 SEGURO_RE = re.compile(r'assist|coris|affinity|seguro|universal|gta\b', re.I)
 PAR_RE = re.compile(r'\b[A-Z]{3}-[A-Z]{3}\b')
 COMISSAO_SEGURO = 0.45     # comissão do seguro (informada pelo usuário)
@@ -25,8 +31,8 @@ PISO_EMISSAO = 100.0       # lucro mínimo desejado por emissão pequena (R$)
 GANHO_COMISSAO = 0.005     # premissa: +0,5 ponto de comissão/incentivo por volume nas consolidadoras
 CHANCE_VOLTAR = 0.30       # premissa: 30% dos recorrentes sumidos voltam a comprar 1 vez
 CHANCE_2A_COMPRA = 0.10    # premissa: 10% dos clientes de compra única fazem uma 2ª compra
-TIPOS = ['Nacional', 'Internacional · consolidadora', 'Internacional · outras contas', 'Hotéis e outros', 'Seguro']
-TIPOS_CURTO = ['Nacional', 'Intern. consolid.', 'Intern. outras', 'Hotéis/outros', 'Seguro']
+TIPOS = ['Nacional', 'Internacional · milhas', 'Internacional · site da cia', 'Internacional · consolidadora', 'Hotéis e outros', 'Seguro']
+TIPOS_CURTO = ['Nacional', 'Intern. milhas', 'Intern. site cia', 'Intern. consolid.', 'Hotéis/outros', 'Seguro']
 
 
 def lucro_bruto(t):
@@ -35,6 +41,13 @@ def lucro_bruto(t):
 
 def eh_consolidadora(t):
     return bool(CONSOLIDADORAS_RE.search(t['conta']))
+
+
+def canal(t):
+    """'consolidadora' | 'site' (compra direto na cia/plataforma) | 'milhas' (conta de pessoa ou programa)."""
+    if eh_consolidadora(t):
+        return 'consolidadora'
+    return 'site' if SITE_RE.search(t['conta'].strip()) else 'milhas'
 
 
 def produto(t):
@@ -53,8 +66,8 @@ def tipo(t):
     if p == 'nacional':
         return TIPOS[0]
     if p == 'internacional':
-        return TIPOS[1] if eh_consolidadora(t) else TIPOS[2]
-    return TIPOS[3] if p == 'hotel' else TIPOS[4]
+        return {'milhas': TIPOS[1], 'site': TIPOS[2], 'consolidadora': TIPOS[3]}[canal(t)]
+    return TIPOS[4] if p == 'hotel' else TIPOS[5]
 
 
 def nome_cia(k):
@@ -76,12 +89,53 @@ def nome_curto(n):
 def abrev(nome):
     """'Manuela Santos' -> 'Manuela S.' (cabe nas tabelas do celular)."""
     p = nome.split()
-    return f'{p[0]} {p[1][0]}.' if len(p) > 1 else nome
+    return f'{p[0]} {p[1][0]}.' if len(p) > 1 and p[0] != 'Empresa' else nome
+
+
+_CACHE_CNPJ = {}
+_SUFIXOS = re.compile(r'\s+(LTDA|ME|EPP|EIRELI|S/?A|SS|MEI)\.?$', re.I)
+
+
+def _carrega_cache():
+    if not _CACHE_CNPJ:
+        try:
+            _CACHE_CNPJ.update(json.loads((Path(__file__).parent / 'cnpj_nomes.json').read_text()))
+        except (OSError, ValueError):
+            pass
+    return _CACHE_CNPJ
+
+
+def nome_empresa(cnpj):
+    """Nome da empresa (nome fantasia, ou razão social sem 'LTDA'). Usa o cache cnpj_nomes.json e, se o CNPJ for novo,
+    consulta a BrasilAPI (cadastro público da Receita). Sem resposta, cai em 'Empresa <início do CNPJ>'."""
+    cache = _carrega_cache()
+    if cnpj in cache:
+        return cache[cnpj]
+    nome = ''
+    try:
+        import requests
+        resp = requests.get(f'https://brasilapi.com.br/api/cnpj/v1/{cnpj}', timeout=10)
+        if resp.status_code == 200:
+            j = resp.json()
+            nome = (j.get('nome_fantasia') or '').strip() or _SUFIXOS.sub('', (j.get('razao_social') or '').strip())
+            nome = ' '.join(w.capitalize() if len(w) > 3 else w for w in nome.split()).strip()
+    except Exception:
+        nome = ''
+    cache[cnpj] = nome or f'Empresa {cnpj[:6]}'
+    return cache[cnpj]
 
 
 def chave_cliente(t):
+    """CPF (ou nome, se não houver documento). CNPJ agrupa pela raiz (8 dígitos): matriz e filial são a mesma empresa."""
     doc = re.sub(r'\D', '', t['cpf'])
+    if len(doc) == 14:
+        return 'CNPJ' + doc[:8]
     return doc if len(doc) >= 11 else (t['nome'].upper().strip() or '?')
+
+
+def curto(c):
+    """Rótulo curto de cliente para tabelas e gráficos."""
+    return ' '.join(c['nome'].split()[:2]) if c['empresa'] else abrev(c['nome'])
 
 
 def mil(v):
@@ -130,8 +184,14 @@ def analisar(vend, M, sem_pag, S, brl, pct):
     clientes = []
     for k, g in grupos.items():
         v_, l_ = soma(g, 'valor'), soma(g)
+        cnpjs = [re.sub(r'\D', '', t['cpf']) for t in g if len(re.sub(r'\D', '', t['cpf'])) == 14]
+        empresa = bool(cnpjs)
+        cnpj = collections.Counter(cnpjs).most_common(1)[0][0] if empresa else ''
         clientes.append(dict(
-            k=k, nome=nome_curto(max(g, key=lambda t: len(t['nome']))['nome']), n=len(g), valor=v_, lucro=l_,
+            k=k, empresa=empresa, cnpj=(f'{cnpj[:2]}.{cnpj[2:5]}.{cnpj[5:8]}/{cnpj[8:12]}-{cnpj[12:]}' if empresa else ''),
+            pax=len({t['nome'].strip().lower() for t in g}),
+            nome=nome_empresa(cnpj) if empresa else nome_curto(max(g, key=lambda t: len(t['nome']))['nome']),
+            n=len(g), valor=v_, lucro=l_,
             margem=l_ / v_ if v_ else 0, por_compra=l_ / len(g), ultima=max(t['mes'] for t in g),
             n_inter=sum(1 for t in g if produto(t) == 'internacional'), tem_seguro=any(produto(t) == 'seguro' for t in g)))
     clientes.sort(key=lambda c: -c['lucro'])
@@ -178,6 +238,19 @@ def analisar(vend, M, sem_pag, S, brl, pct):
             passo='Levar o volume por cia e por mês para a consolidadora e pedir incentivo por meta (comissão maior acima de um volume mensal). '
                   'Cotar a mesma cia nas duas consolidadoras e concentrar onde pagar mais.',
             premissa=f'Estimativa: +{pct(GANHO_COMISSAO).replace("%", " ponto percentual")} de comissão sobre o volume das consolidadoras. Depende do que elas aceitarem.'))
+    i_milhas = [t for t in inter if canal(t) == 'milhas']
+    i_outros = [t for t in inter if canal(t) != 'milhas']
+    if i_milhas and i_outros:
+        l_m, l_o = soma(i_milhas) / len(i_milhas), soma(i_outros) / len(i_outros)
+        if l_m > l_o:
+            n_troca = 0.10 * len(i_outros)
+            ops.append(dict(
+                chave='milhas', curto='Emitir mais internacional em milhas', ganho=n_troca * (l_m - l_o), esforco='Médio',
+                por_que=f'O bilhete internacional emitido em milhas deixa {brl(l_m)} por venda, contra {brl(l_o)} no site da cia e nas consolidadoras '
+                        f'({len(i_milhas)} vendas em milhas, {len(i_outros)} nos outros canais).',
+                passo='Quando houver saldo de milhas para a rota, cotar primeiro em milhas e só depois no site ou na consolidadora. '
+                      'Priorizar milhas nas rotas e nos clientes recorrentes que voltam a comprar a mesma viagem.',
+                premissa=f'Estimativa: 10% das vendas internacionais dos outros canais ({n_troca:.0f} vendas) passam para milhas. Depende do seu saldo de milhas.'))
     if sumidos:
         ops.append(dict(
             chave='reativar', curto='Reativar recorrentes que sumiram', ganho=CHANCE_VOLTAR * sum(c['por_compra'] for c in sumidos), esforco='Baixo',
@@ -235,22 +308,24 @@ def sequencia(O, parcial, rotulo_fim, res, top_conta, R, brl, pct, meses_abrev, 
                       f'{esc(o["por_que"])}\n<i>Como:</i> {esc(o["passo"])}\n<i>{esc(o["premissa"])}</i>\n')
     m2 = '\n'.join(linhas)
 
-    tab = ['Tipo             Vendas Lucro/venda Marg.', '-' * 38]
+    tab = ['Tipo               Vendas Lucro/venda Marg.', '-' * 41]
     for x in O['tipos']:
-        tab.append(f'{x["curto"]:<16} {x["n"]:>5} {mil(x["por_venda"]).replace("R$ ", ""):>10} {pct(x["margem"]):>6}')
+        tab.append(f'{x["curto"]:<17} {x["n"]:>6} {mil(x["por_venda"]).replace("R$ ", ""):>10} {pct(x["margem"]):>6}')
     m3 = ('<b>Por tipo de venda</b>\n<pre>' + '\n'.join(tab) + '</pre>\n'
-          '<i>Nacional ou internacional pelo destino do voo. Consolidadora = Ancoradouro e KG Travel.</i>')
+          '<i>Nacional ou internacional pelo destino do voo. Milhas = contas com nome de pessoa e programas (Smiles, Azul, Latam). '
+          'Site da cia = compra direto na cia ou plataforma. Consolidadora = Ancoradouro e KG Travel.</i>')
 
     sc = O['seg_cli']
     tabc = ['Cliente       Comp. Lucro  Marg. Últ.', '-' * 36]
     for c in O['clientes'][:8]:
-        tabc.append(f'{abrev(c["nome"])[:13]:<13} {c["n"]:>4} {mil(c["lucro"]).replace("R$ ", ""):>6} {pct(c["margem"], 0):>5} {meses_abrev[c["ultima"] - 1]:>4}')
+        tabc.append(f'{curto(c)[:13]:<13} {c["n"]:>4} {mil(c["lucro"]).replace("R$ ", ""):>6} {pct(c["margem"], 0):>5} {meses_abrev[c["ultima"] - 1]:>4}')
     m5 = (f'<b>Seus clientes ({len(O["clientes"])} no período)</b>\n'
           f'• <b>{sc["recorrentes"]["n"]} recorrentes</b> (3+ compras) geram <b>{pct(sc["recorrentes"]["share"], 0)}</b> do lucro bruto.\n'
           f'• {sc["ocasionais"]["n"]} ocasionais (2 compras): {pct(sc["ocasionais"]["share"], 0)}.\n'
           f'• {sc["unicos"]["n"]} de compra única: {pct(sc["unicos"]["share"], 0)}.\n'
-          f'• O maior cliente ({esc(c1["nome"])}) sozinho é <b>{pct(share1, 0)}</b> do lucro, com {c1["n"]} compras.\n\n'
-          '<b>Maiores clientes por lucro</b>\n<pre>' + '\n'.join(tabc) + '</pre>')
+          + (f'• O maior cliente é a empresa <b>{esc(c1["nome"])}</b> (CNPJ {c1["cnpj"]}, {c1["pax"]} passageiros diferentes): sozinha é <b>{pct(share1, 0)}</b> do lucro, com {c1["n"]} compras.\n\n'
+             if c1['empresa'] else f'• O maior cliente ({esc(c1["nome"])}) sozinho é <b>{pct(share1, 0)}</b> do lucro, com {c1["n"]} compras.\n\n')
+          + '<b>Maiores clientes por lucro</b>\n<pre>' + '\n'.join(tabc) + '</pre>')
     if O['melhores_margens']:
         m5 += '\n<b>Melhores margens entre os recorrentes</b>\n' + '\n'.join(
             f'• {esc(c["nome"])}: {pct(c["margem"])} em {c["n"]} compras ({mil(c["lucro"])})' for c in O['melhores_margens'])
@@ -260,7 +335,8 @@ def sequencia(O, parcial, rotulo_fim, res, top_conta, R, brl, pct, meses_abrev, 
         nomes = ', '.join(esc(c['nome']) for c in O['sem_seguro'][:5])
         acoes.append(f'1. <b>Vender seguro para quem já viaja com você:</b> {nomes} têm 2+ bilhetes internacionais e nenhum seguro comprado com você.')
     if c1['n'] >= 12:
-        acoes.append(f'2. <b>Formalizar o maior cliente</b> ({esc(c1["nome"])}, {c1["n"]} compras, {pct(share1, 0)} do lucro): '
+        quem = f'a empresa {esc(c1["nome"])}, {c1["pax"]} passageiros' if c1['empresa'] else esc(c1['nome'])
+        acoes.append(f'2. <b>Formalizar o maior cliente</b> ({quem}, {c1["n"]} compras, {pct(share1, 0)} do lucro): '
                      'contrato com taxa de serviço mensal ou prioridade de atendimento. Hoje um único cliente sustenta boa parte do resultado.')
     alto_vol = [c for c in O['recorrentes'] if c['margem'] < 0.05 and c['valor'] >= 50000]
     if alto_vol:
@@ -365,7 +441,7 @@ def graficos(O, out, sufixo):
     ys = list(range(len(cl)))
     ax.barh(ys, [c['lucro'] for c in cl], color=[ACCENT if c['n'] >= 3 else NEUTRAL for c in cl], height=0.62)
     ax.set_yticks(ys)
-    ax.set_yticklabels([abrev(c['nome']) for c in cl], fontsize=9, color=INK)
+    ax.set_yticklabels([curto(c) for c in cl], fontsize=9, color=INK)
     mx = max(c['lucro'] for c in cl)
     for y, c in zip(ys, cl):
         ax.text(c['lucro'] + mx * 0.015, y, f'{mil(c["lucro"])} · {c["n"]} compras · {_pct(c["margem"])}', va='center', fontsize=8.5, color=INK)
