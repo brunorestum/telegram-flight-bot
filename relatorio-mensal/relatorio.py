@@ -117,7 +117,7 @@ def ler_vendas(wv, wf):
              nome=col(h, 'Nome'), valor=col(h, 'Valor'), base=col(h, 'Base do imposto', 'Lucro na operação'),
              naotrib=col(h, 'Lucro não tributado'), vend=col(h, 'Vendedor'), com=col(h, 'Comissão'),
              pag=col(h, 'Pagamento'), data=col(h, 'Data de venda'),
-             ida=col(h, 'Itinerario da ida'), volta=col(h, 'Itinerário da volta'))
+             ida=col(h, 'Itinerario da ida'), volta=col(h, 'Itinerário da volta'), data_ida=col(h, 'Data da ida'))
     tx, r = [], 2
     while r <= ws.max_row:
         a, b = txt(ws.cell(r, 1).value).lower(), txt(ws.cell(r, 2).value).lower()
@@ -133,7 +133,8 @@ def ler_vendas(wv, wf):
                 valor=num(ws.cell(r, c['valor']).value), base=num(ws.cell(r, c['base']).value),
                 naotrib=num(ws.cell(r, c['naotrib']).value), vend=txt(ws.cell(r, c['vend']).value),
                 com=num(ws.cell(r, c['com']).value), pag=txt(ws.cell(r, c['pag']).value),
-                ida=txt(ws.cell(r, c['ida']).value), volta=txt(ws.cell(r, c['volta']).value)))
+                ida=txt(ws.cell(r, c['ida']).value), volta=txt(ws.cell(r, c['volta']).value),
+                data_ida=ws.cell(r, c['data_ida']).value if isinstance(ws.cell(r, c['data_ida']).value, dt.datetime) else None))
         r += 1
     # quadro-resumo mensal (custos fixos são digitados à mão lá)
     hr = next(i for i in range(r, ws.max_row + 1) if txt(ws.cell(i, 1).value).lower() == 'mes')
@@ -389,8 +390,9 @@ def analisar(tx, resumo, total_row, renda, fluxo, pend_fluxo, ret, hoje):
         parcial=parcial,
     )
     R = analisar_retiradas(ret, M, ref, ano, hoje, parcial) if ret else None
-    O = oportunidades.analisar(vend, M, sem_pag, S, brl, pct)
-    ctx = dict(parcial=parcial, rotulo=rotulo_fim, res=res, top_conta=(top_conta[0], top_conta[1][0]))
+    O = oportunidades.analisar(vend, M, sem_pag, S, brl, pct, hoje)
+    itens_ret = R.pop('_itens') if R else []
+    ctx = dict(parcial=parcial, rotulo=rotulo_fim, res=res, top_conta=(top_conta[0], top_conta[1][0]), itens_ret=itens_ret)
     return D, R, O, ctx
 
 
@@ -462,6 +464,7 @@ def analisar_retiradas(ret, M, ref, ano, hoje, parcial):
     leitura.append('<b>Os seus R$ 2.000,00 fixos já estão na linha "Salário" da aba Vendas</b>, e a comissão também. As passagens são só a forma de pagamento, então não há custo em dobro.')
 
     return dict(
+        _itens=itens,
         sub=f'Período: 01/01/{ano} a {data_br(hoje) if parcial else data_br(dt.date(ano, ref, calendar.monthrange(ano, ref)[1]))} · Fonte: aba "Passagens Retiradas" · Gerado em {data_br(hoje)}',
         M=linhas and [{k: v for k, v in x.items() if k != 'fora'} for x in linhas],
         pts=pts, carry=carry, dir=dir_, ret=retir, net=net, fim=fim,
@@ -535,8 +538,9 @@ def main():
     if R:
         arquivos.append(out / f'retiradas-{sufixo}.html')
         arquivos[1].write_text(render('retiradas.html', R))
-    imgs = oportunidades.graficos(O, out, sufixo)
-    seq = oportunidades.sequencia(O, ctx['parcial'], ctx['rotulo'], ctx['res'], ctx['top_conta'], R, brl, pct, MESES, imgs)
+    I = oportunidades.insights_retiradas(ctx['itens_ret'], R)
+    imgs = oportunidades.graficos(O, out, sufixo, I)
+    seq = oportunidades.sequencia(O, ctx['parcial'], ctx['rotulo'], ctx['res'], ctx['top_conta'], R, brl, pct, MESES, imgs, I)
     texto = '\n\n----\n\n'.join(c for t, c in seq if t == 'texto')
     (out / f'mensagem-{sufixo}.txt').write_text(texto)
     print(texto)

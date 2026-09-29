@@ -8,6 +8,7 @@ Lucro bruto da venda = Base do imposto + Lucro não tributado + Comissão (a "Re
 Nacional x internacional vem do destino (aeroportos do itinerário), e não da companhia: a LATAM, a GOL e a Azul também voam para fora.
 """
 import collections
+import datetime as dt
 import html
 import json
 import re
@@ -17,12 +18,14 @@ from pathlib import Path
 AEROPORTOS_BR = set(
     'GIG SDU GRU CGH VCP BSB CNF PLU POA FLN CWB VIX SSA REC FOR NAT MCZ AJU JPA SLZ THE BEL MAO CGB CGR GYN BPS IOS '
     'NVT JOI IGU FOZ LDB MGF UDI RAO SJK VDC CXJ PMW PVH RBR BVB MCP STM MAB IMP PNZ JDO CPV JJD LEC FEN RIO SAO JPR '
-    'PET CKS ARU MOC IZA GVR UBA UNA CAW BGX CFB BAU AAX JCB CLV GEL ATM BJP SOD QSC ERM OAL FRC GPB JCM CIZ'.split())
+    'PET CKS ARU MOC IZA GVR UBA UNA CAW BGX CFB BAU AAX JCB CLV GEL ATM BJP SOD QSC ERM OAL FRC GPB JCM CIZ SJP OPS'.split())
 CONSOLIDADORAS_RE = re.compile(r'ancorad\w*|kg\s*travel', re.I)
 # Contas que NÃO são milhas: compra direto no site da cia, plataformas, hotéis e balcão. O restante (contas com nome de
 # pessoa e programas como Smiles/Azul/Latam) é emissão em milhas.
 SITE_RE = re.compile(r'site|pagante|expedi|taap|hotel|garden|turismo|seguro|coris|emirates|air france|qtar|qatar|^ita$|^tap$|'
                      r'avianca|thai|copa|easyjet|aerolineas|phillipine|cebu|american airlines|^aa (site|altera)|iberia|united|balc[aã]o|consultoria', re.I)
+HOTEL_RE = re.compile(r'expedi|taap|hotel|garden', re.I)
+SERVICO_RE = re.compile(r'localiza|hertz|movida|unidas|\bavis\b|altera', re.I)   # aluguel de carro e remarcação
 SEGURO_RE = re.compile(r'assist|coris|affinity|seguro|universal|gta\b', re.I)
 PAR_RE = re.compile(r'\b[A-Z]{3}-[A-Z]{3}\b')
 COMISSAO_SEGURO = 0.45     # comissão do seguro (informada pelo usuário)
@@ -31,8 +34,9 @@ PISO_EMISSAO = 100.0       # lucro mínimo desejado por emissão pequena (R$)
 GANHO_COMISSAO = 0.005     # premissa: +0,5 ponto de comissão/incentivo por volume nas consolidadoras
 CHANCE_VOLTAR = 0.30       # premissa: 30% dos recorrentes sumidos voltam a comprar 1 vez
 CHANCE_2A_COMPRA = 0.10    # premissa: 10% dos clientes de compra única fazem uma 2ª compra
-TIPOS = ['Nacional', 'Internacional · milhas', 'Internacional · site da cia', 'Internacional · consolidadora', 'Hotéis e outros', 'Seguro']
-TIPOS_CURTO = ['Nacional', 'Intern. milhas', 'Intern. site cia', 'Intern. consolid.', 'Hotéis/outros', 'Seguro']
+TIPOS = ['Nacional', 'Internacional · milhas', 'Internacional · site da cia', 'Internacional · consolidadora', 'Hotel', 'Outros serviços', 'Seguro']
+TIPOS_CURTO = ['Nacional', 'Intern. milhas', 'Intern. site cia', 'Intern. consolid.', 'Hotel', 'Outros serviços', 'Seguro']
+CATEGORIAS = ['Passagem', 'Hotel', 'Seguro', 'Outros serviços']
 
 
 def lucro_bruto(t):
@@ -51,12 +55,14 @@ def canal(t):
 
 
 def produto(t):
-    """'seguro' | 'nacional' | 'internacional' | 'hotel' (hotéis e demais vendas sem trecho aéreo)."""
+    """'seguro' | 'nacional' | 'internacional' | 'hotel' | 'servico' (aluguel de carro, remarcação e demais sem trecho aéreo)."""
     if SEGURO_RE.search(t['cia']) or SEGURO_RE.search(t['conta']):
         return 'seguro'
     it = (t.get('ida', '') + ' ' + t.get('volta', '')).upper()
     if not PAR_RE.search(it):
-        return 'hotel'
+        if SERVICO_RE.search(t['cia']) or SERVICO_RE.search(t['conta']):
+            return 'servico'
+        return 'hotel' if HOTEL_RE.search(t['conta']) else 'servico'
     codigos = re.findall(r'\b[A-Z]{3}\b', it)
     return 'nacional' if all(c in AEROPORTOS_BR for c in codigos) else 'internacional'
 
@@ -67,7 +73,12 @@ def tipo(t):
         return TIPOS[0]
     if p == 'internacional':
         return {'milhas': TIPOS[1], 'site': TIPOS[2], 'consolidadora': TIPOS[3]}[canal(t)]
-    return TIPOS[4] if p == 'hotel' else TIPOS[5]
+    return {'hotel': TIPOS[4], 'servico': TIPOS[5], 'seguro': TIPOS[6]}[p]
+
+
+def categoria(t):
+    p = produto(t)
+    return {'nacional': 'Passagem', 'internacional': 'Passagem', 'hotel': 'Hotel', 'seguro': 'Seguro', 'servico': 'Outros serviços'}[p]
 
 
 def nome_cia(k):
@@ -107,7 +118,7 @@ def _carrega_cache():
 
 def nome_empresa(cnpj):
     """Nome da empresa (nome fantasia, ou razão social sem 'LTDA'). Usa o cache cnpj_nomes.json e, se o CNPJ for novo,
-    consulta a BrasilAPI (cadastro público da Receita). Sem resposta, cai em 'Empresa <início do CNPJ>'."""
+    consulta a BrasilAPI (cadastro público da Receita). Sem resposta, mostra o próprio CNPJ (nunca inventa nome)."""
     cache = _carrega_cache()
     if cnpj in cache:
         return cache[cnpj]
@@ -121,8 +132,10 @@ def nome_empresa(cnpj):
             nome = ' '.join(w.capitalize() if len(w) > 3 else w for w in nome.split()).strip()
     except Exception:
         nome = ''
-    cache[cnpj] = nome or f'Empresa {cnpj[:6]}'
-    return cache[cnpj]
+    if not nome:  # sem resposta: mostra o próprio CNPJ, sem inventar nome
+        return f'CNPJ {cnpj[:2]}.{cnpj[2:5]}.{cnpj[5:8]}/{cnpj[8:12]}-{cnpj[12:]}'
+    cache[cnpj] = nome
+    return nome
 
 
 def chave_cliente(t):
@@ -152,7 +165,58 @@ def mil(v):
     return ('−' if v < 0 else '') + 'R$ ' + s.replace('.', ',')
 
 
-def analisar(vend, M, sem_pag, S, brl, pct):
+CIDADES = {'POA': 'Porto Alegre', 'GIG': 'Rio (Galeão)', 'SDU': 'Rio (Santos Dumont)', 'GRU': 'São Paulo (Guarulhos)',
+           'CGH': 'São Paulo (Congonhas)', 'GYN': 'Goiânia', 'SCL': 'Santiago', 'FEN': 'Fernando de Noronha'}
+
+
+def rota_par(rota):
+    """'POA-GYN' e 'GYN-POA' são a mesma rota (ida e volta somadas). Sem trecho aéreo, devolve None."""
+    cods = re.findall(r'\b[A-Z]{3}\b', rota.upper())
+    if len(cods) < 2:
+        return None
+    a, b = cods[0], cods[-1]
+    return ' – '.join(sorted((a, b)))
+
+
+def insights_retiradas(itens, R):
+    """Onde as retiradas em passagens se concentram: por rota, por pessoa, por cia e por mês (data do lançamento)."""
+    if not itens:
+        return None
+    total = sum(x['valor'] for x in itens)
+    rotas = collections.defaultdict(lambda: dict(n=0, valor=0.0))
+    sem_rota = []
+    for x in itens:
+        p = rota_par(x['rota'])
+        if p is None:
+            sem_rota.append(x)
+            continue
+        rotas[p]['n'] += 1
+        rotas[p]['valor'] += x['valor']
+    rotas = sorted(([k, v['n'], v['valor']] for k, v in rotas.items()), key=lambda z: -z[2])
+    pessoas = collections.defaultdict(lambda: [0, 0.0])
+    for x in itens:
+        k = x['nome'].split()[0] if x['nome'].strip() else '(sem nome)'
+        pessoas[k][0] += 1
+        pessoas[k][1] += x['valor']
+    pessoas = sorted(([k, v[0], v[1]] for k, v in pessoas.items()), key=lambda z: -z[2])
+    cias = collections.defaultdict(float)
+    for x in itens:
+        cias[nome_cia(x['cia']) if x['cia'].strip() not in ('', '-') else '(sem cia)'] += x['valor']
+    meses = collections.defaultdict(float)
+    for x in itens:
+        meses[x['data'].month] += x['valor']
+    # mesma rota, mesma data, duas pessoas: retirada em dobro
+    grupos = collections.defaultdict(list)
+    for x in itens:
+        p = rota_par(x['rota'])
+        if p:
+            grupos[(x['data'], x['rota'].upper())].append(x)
+    dobradas = [g for g in grupos.values() if len({y['nome'] for y in g}) > 1]
+    return dict(itens=itens, total=total, n=len(itens), medio=total / len(itens), rotas=rotas, sem_rota=sem_rota, pessoas=pessoas,
+                cias=sorted(cias.items(), key=lambda z: -z[1]), meses=dict(meses), dobradas=dobradas)
+
+
+def analisar(vend, M, sem_pag, S, brl, pct, hoje):
     n_meses = len(M)
     ref = M[-1]['m']
     for t in vend:
@@ -177,6 +241,15 @@ def analisar(vend, M, sem_pag, S, brl, pct):
             tipos.append(dict(nome=nome, curto=curto, n=len(g), valor=v_, lucro=l_, por_venda=l_ / len(g), margem=l_ / v_ if v_ else 0))
     por_tipo = {x['nome']: x for x in tipos}
 
+    # ---- retorno por categoria (o que oferecer ao cliente) ----
+    categorias = []
+    for nome in CATEGORIAS:
+        g = [t for t in vend if categoria(t) == nome]
+        if g:
+            v_, l_ = soma(g, 'valor'), soma(g)
+            categorias.append(dict(nome=nome, n=len(g), valor=v_, lucro=l_, por_venda=l_ / len(g), margem=l_ / v_ if v_ else 0,
+                                   share=l_ / L if L else 0, clientes=len({chave_cliente(t) for t in g})))
+
     # ---- por cliente ----
     grupos = collections.defaultdict(list)
     for t in vend:
@@ -190,12 +263,34 @@ def analisar(vend, M, sem_pag, S, brl, pct):
         clientes.append(dict(
             k=k, empresa=empresa, cnpj=(f'{cnpj[:2]}.{cnpj[2:5]}.{cnpj[5:8]}/{cnpj[8:12]}-{cnpj[12:]}' if empresa else ''),
             pax=len({t['nome'].strip().lower() for t in g}),
-            nome=nome_empresa(cnpj) if empresa else nome_curto(max(g, key=lambda t: len(t['nome']))['nome']),
+            nome=nome_empresa(cnpj) if empresa else nome_curto(collections.Counter(t['nome'].strip() for t in g).most_common(1)[0][0]),
             n=len(g), valor=v_, lucro=l_,
             margem=l_ / v_ if v_ else 0, por_compra=l_ / len(g), ultima=max(t['mes'] for t in g),
-            n_inter=sum(1 for t in g if produto(t) == 'internacional'), tem_seguro=any(produto(t) == 'seguro' for t in g)))
+            n_inter=sum(1 for t in g if produto(t) == 'internacional'), tem_seguro=any(produto(t) == 'seguro' for t in g),
+            tem_hotel=any(produto(t) == 'hotel' for t in g)))
     clientes.sort(key=lambda c: -c['lucro'])
     lucro_cli = sum(c['lucro'] for c in clientes)
+    acum = 0.0
+    for c in clientes:  # faixa A = os que somam até 50% do lucro; B = até 80%; C = o resto
+        c['faixa'] = 'A' if acum < 0.5 * lucro_cli else ('B' if acum < 0.8 * lucro_cli else 'C')
+        acum += c['lucro']
+        c['falta'] = [nome for nome, cond in (('seguro', not c['tem_seguro']), ('hotel', not c['tem_hotel'])) if c['n_inter'] > 0 and cond]
+    faixas = {f: dict(n=sum(1 for c in clientes if c['faixa'] == f), lucro=sum(c['lucro'] for c in clientes if c['faixa'] == f)) for f in 'ABC'}
+    em_risco = sorted([c for c in clientes if c['faixa'] in 'AB' and c['ultima'] <= ref - 3], key=lambda c: -c['lucro'])
+    inter_cli = [c for c in clientes if c['n_inter'] > 0]
+    penetracao = dict(n=len(inter_cli), hotel=sum(1 for c in inter_cli if c['tem_hotel']), seguro=sum(1 for c in inter_cli if c['tem_seguro']))
+
+    # ---- viagens dos próximos 60 dias (ainda dá tempo de vender seguro e hotel) ----
+    limite = dt.datetime.combine(hoje, dt.time.min) + dt.timedelta(days=60)
+    inicio = dt.datetime.combine(hoje, dt.time.min)
+    viajantes_seg = {t['nome'].strip().lower() for t in vend if produto(t) == 'seguro'} | {chave_cliente(t) for t in vend if produto(t) == 'seguro'}
+    proximas = []
+    for t in vend:
+        d = t.get('data_ida')
+        if produto(t) == 'internacional' and d and inicio <= d <= limite:
+            proximas.append(dict(nome=nome_curto(t['nome']), data=d, rota=t['ida'].strip(),
+                                 seguro=t['nome'].strip().lower() in viajantes_seg or chave_cliente(t) in viajantes_seg))
+    proximas.sort(key=lambda x: x['data'])
     seg_cli = {}
     for nome, cond in (('recorrentes', lambda c: c['n'] >= 3), ('ocasionais', lambda c: c['n'] == 2), ('unicos', lambda c: c['n'] == 1)):
         g = [c for c in clientes if cond(c)]
@@ -277,77 +372,162 @@ def analisar(vend, M, sem_pag, S, brl, pct):
         n_inter=len(inter), l_inter=soma(inter), v_inter=soma(inter, 'valor'),
         seg=dict(n=len(seg), valor=soma(seg, 'valor'), lucro=soma(seg), margem=soma(seg) / soma(seg, 'valor') if seg else 0,
                  med=seg_med, mediana=seg_mediana, adesao=adesao),
+        categorias=categorias, faixas=faixas, em_risco=em_risco, penetracao=penetracao, proximas=proximas,
         clientes=clientes, lucro_cli=lucro_cli, seg_cli=seg_cli, recorrentes=recorrentes, sumidos=sumidos, unicos=unicos,
         sem_seguro=sem_seguro, melhores_margens=melhores_margens, ref=ref, sem_pag=(len(sem_pag), soma(sem_pag, 'valor')),
     )
 
 
 # ---------- textos (Telegram, HTML) ----------
-def sequencia(O, parcial, rotulo_fim, res, top_conta, R, brl, pct, meses_abrev, imgs):
-    """Lista ordenada de ('texto', str) e ('imagem', (Path, legenda)) para enviar ao Telegram."""
+def sequencia(O, parcial, rotulo_fim, res, top_conta, R, brl, pct, meses_abrev, imgs, I=None):
+    """Lista ordenada de ('texto', str) e ('imagem', (Path, legenda)) para enviar ao Telegram.
+    Cada bloco começa com "Para quê": a decisão que aquele dado ajuda a tomar."""
     esc = html.escape
+    para = lambda t: f'<i>Para quê: {t}</i>'
     c1 = O['clientes'][0]
     share1 = c1['lucro'] / O['lucro_cli']
 
-    linhas_tipo = []
-    for x in O['tipos']:
-        linhas_tipo.append(f'• {esc(x["nome"])}: <b>{brl(x["por_venda"])}</b> por venda ({x["n"]} vendas, {pct(x["margem"], 0)} do valor)')
+    # ---- 1) resumo ----
     m1 = (f'<b>Agência do Futuro · até {rotulo_fim}</b>\n'
+          + para('saber se o mês foi bom e quanto cada tipo de venda deixa.') + '\n\n'
           f'Passaram pela agência <b>{mil(O["V"])}</b> em {O["n"]} vendas (quase tudo vai direto para as cias aéreas). '
           f'O lucro bruto foi de <b>{mil(O["L"])}</b>, uns <b>{mil(O["L"] / O["n_meses"])} por mês</b>.\n'
-          f'Depois de custos e comissões, o lucro do ano é <b>{brl(res)}</b> (média de {brl(res / O["n_meses"])}/mês).\n\n'
-          '<b>Quanto cada tipo de venda deixa, em média</b>\n' + '\n'.join(linhas_tipo) + '\n\n'
-          'No internacional você ganha comissão sobre o volume, com risco mínimo. O que muda o resultado é vender mais bilhetes, '
-          'vender o seguro junto e fazer o cliente voltar.\n'
+          f'Depois de custos e comissões, o lucro do ano é <b>{brl(res)}</b> (média de {brl(res / O["n_meses"])}/mês).\n'
           f'Cada 10% a mais de bilhetes internacionais = <b>+{mil(O["l_inter"] * 0.1 / O["n_meses"])} por mês</b>.')
 
-    linhas = [f'<b>Onde dá para ganhar mais</b>\nPotencial estimado: <b>+{mil(O["total"])}</b> no período (≈ {mil(O["total"] / O["n_meses"])}/mês), '
-              'somando as ideias abaixo. São estimativas, não promessas.\n']
+    # ---- 2) retorno por categoria ----
+    tabcat = ['Categoria        Vendas  Lucro   % lucro  Por venda', '-' * 47]
+    for x in O['categorias']:
+        tabcat.append(f'{x["nome"]:<15} {x["n"]:>7} {mil(x["lucro"]).replace("R$ ", ""):>7} {pct(x["share"], 0):>7} {mil(x["por_venda"]).replace("R$ ", ""):>10}')
+    cat = {x['nome']: x for x in O['categorias']}
+    pen = O['penetracao']
+    linhas2 = [f'<b>Retorno por categoria</b>\n' + para('decidir o que oferecer primeiro a cada cliente.'),
+               '<pre>' + '\n'.join(tabcat) + '</pre>']
+    pontos = []
+    if 'Seguro' in cat and 'Passagem' in cat:
+        pontos.append(f'• Seguro é só {pct(cat["Seguro"]["share"], 0)} do lucro, mas cada venda deixa {brl(cat["Seguro"]["por_venda"])}, '
+                      f'contra {brl(cat["Passagem"]["por_venda"])} de uma passagem, e não depende de cia nem de estoque.')
+    if 'Hotel' in cat:
+        pontos.append(f'• Hotel é {pct(cat["Hotel"]["share"], 0)} do lucro ({cat["Hotel"]["clientes"]} clientes), com {brl(cat["Hotel"]["por_venda"])} por venda.')
+    if pen['n']:
+        pontos.append(f'• Dos <b>{pen["n"]}</b> clientes que compraram passagem internacional, só <b>{pen["hotel"]}</b> ({pct(pen["hotel"] / pen["n"], 0)}) '
+                      f'compraram hotel com você e <b>{pen["seguro"]}</b> ({pct(pen["seguro"] / pen["n"], 0)}) compraram seguro. É aí que está a venda que ainda não aconteceu.')
+    canais = [x for x in O['tipos'] if x['nome'].startswith('Internacional')]
+    if canais:
+        pontos.append('• Passagem internacional por canal (lucro por venda): ' + '; '.join(f'{esc(x["curto"].replace("Intern. ", ""))} {brl(x["por_venda"])} ({x["n"]} vendas)' for x in canais) + '.')
+    linhas2.append('\n'.join(pontos))
+    linhas2.append('<i>Nacional ou internacional pelo destino do voo. Milhas = contas com nome de pessoa e programas. Site da cia = compra direto na cia ou plataforma. '
+                   'Consolidadora = Ancoradouro e KG Travel.</i>')
+    m2cat = '\n\n'.join(linhas2)
+
+    # ---- 3) clientes: quem dá mais retorno ----
+    fx = O['faixas']
+    tabc = ['Cliente          Lucro Comp. Últ. Falta', '-' * 41]
+    for c in O['clientes'][:8]:
+        falta = ' '.join({'seguro': 'S', 'hotel': 'H'}[f] for f in c['falta']) or '-'
+        tabc.append(f'{curto(c)[:15]:<15} {mil(c["lucro"]).replace("R$ ", ""):>6} {c["n"]:>5} {meses_abrev[c["ultima"] - 1]:>4} {falta:>5}')
+    m3 = (f'<b>Clientes: quem dá mais retorno</b>\n' + para('saber a quem dar mais atenção e o que oferecer a cada um.') + '\n\n'
+          f'• <b>{fx["A"]["n"]} clientes</b> (faixa A) geram metade do lucro bruto ({mil(fx["A"]["lucro"])}). '
+          f'Outros {fx["B"]["n"]} (faixa B) somam mais 30%. Os {fx["C"]["n"]} restantes (faixa C) ficam com 20%.\n'
+          + (f'• O maior é a empresa <b>{esc(c1["nome"])}</b> (CNPJ {c1["cnpj"]}, {c1["pax"]} passageiros diferentes): {pct(share1, 0)} do lucro, {c1["n"]} compras.\n'
+             if c1['empresa'] else f'• O maior é {esc(c1["nome"])}: {pct(share1, 0)} do lucro, {c1["n"]} compras.\n')
+          + '\n<b>Faixa A, do maior para o menor</b>\n<pre>' + '\n'.join(tabc) + '</pre>\n'
+          '<i>Falta: S = nunca comprou seguro com você, H = nunca comprou hotel (só para quem já viajou para fora).</i>')
+    if O['em_risco']:
+        m3 += ('\n\n<b>Clientes importantes que pararam de comprar</b> (faixa A ou B, sem compra há 3+ meses)\n'
+               + '\n'.join(f'• {esc(c["nome"])}: {mil(c["lucro"])} de lucro, última compra em {meses_abrev[c["ultima"] - 1]}' for c in O['em_risco'][:5]))
+
+    acoes = ['<b>O que fazer com cada grupo</b>']
+    a_seg = [c for c in O['clientes'] if c['faixa'] in 'AB' and 'seguro' in c['falta']]
+    if a_seg:
+        acoes.append(f'1. <b>Faixa A/B sem seguro:</b> {", ".join(esc(c["nome"]) for c in a_seg[:5])}. Ofereça seguro na próxima cotação.')
+    if c1['n'] >= 12:
+        quem = f'a empresa {esc(c1["nome"])}, {c1["pax"]} passageiros' if c1['empresa'] else esc(c1['nome'])
+        acoes.append(f'2. <b>Maior cliente</b> ({quem}, {pct(share1, 0)} do lucro): contrato com taxa de serviço mensal ou prioridade de atendimento. Um único cliente sustenta boa parte do resultado.')
+    if O['em_risco']:
+        acoes.append(f'3. <b>Faixa A/B parada:</b> são {len(O["em_risco"])} clientes sem comprar há 3+ meses (os 5 maiores estão listados acima). Chame primeiro os de maior lucro: cada um vale mais que uma venda nova.')
+    acoes.append('4. <b>Faixa C:</b> atendimento no automático (mensagem padrão e link de cotação). O tempo vai para a faixa A.')
+    acoes.append('5. <b>Antes de cada viagem:</b> chame 45 dias antes da data em que o cliente costuma viajar, com cotação pronta.')
+    m3 += '\n\n' + '\n\n'.join(acoes)
+
+    # ---- 4) próximas viagens ----
+    m4 = ''
+    if O['proximas']:
+        sem = [x for x in O['proximas'] if not x['seguro']]
+        linhas4 = [f'<b>Viagens internacionais dos próximos 60 dias</b>\n' + para('vender seguro, hotel e outros serviços antes de o cliente embarcar.') + '\n',
+                   f'{len(O["proximas"])} passageiros viajam nos próximos 60 dias, e {len(sem)} ainda não têm seguro comprado com você.']
+        linhas4 += [f'• {esc(x["nome"])}: {x["data"]:%d/%m}, {esc(x["rota"])}' + (' (já tem seguro)' if x['seguro'] else '') for x in O['proximas'][:10]]
+        m4 = '\n'.join(linhas4)
+
+    # ---- 5) oportunidades ----
+    linhas = [f'<b>Onde dá para ganhar mais</b>\n' + para('escolher em quais ações gastar o seu tempo, pelo ganho estimado.') + '\n\n'
+              f'Potencial estimado: <b>+{mil(O["total"])}</b> no período (≈ {mil(O["total"] / O["n_meses"])}/mês), somando as ideias abaixo. São estimativas, não promessas.\n']
     for i, o in enumerate(O['ops'], 1):
         linhas.append(f'<b>{i}. {esc(o["curto"])}</b> · +{mil(o["ganho"])} · esforço {o["esforco"].lower()}\n'
                       f'{esc(o["por_que"])}\n<i>Como:</i> {esc(o["passo"])}\n<i>{esc(o["premissa"])}</i>\n')
-    m2 = '\n'.join(linhas)
+    m5 = '\n'.join(linhas)
 
-    tab = ['Tipo               Vendas Lucro/venda Marg.', '-' * 41]
-    for x in O['tipos']:
-        tab.append(f'{x["curto"]:<17} {x["n"]:>6} {mil(x["por_venda"]).replace("R$ ", ""):>10} {pct(x["margem"]):>6}')
-    m3 = ('<b>Por tipo de venda</b>\n<pre>' + '\n'.join(tab) + '</pre>\n'
-          '<i>Nacional ou internacional pelo destino do voo. Milhas = contas com nome de pessoa e programas (Smiles, Azul, Latam). '
-          'Site da cia = compra direto na cia ou plataforma. Consolidadora = Ancoradouro e KG Travel.</i>')
+    # ---- 6) produtos que ainda não vende ----
+    serv = [x for x in O['categorias'] if x['nome'] == 'Outros serviços']
+    m6 = ('<b>Produtos que você ainda não vende (ou vende pouco)</b>\n' + para('aumentar o lucro por cliente sem depender de vender mais bilhetes.') + '\n\n'
+          'Na sua planilha aparecem passagem, hotel e seguro' + (f', e {serv[0]["n"]} vendas de outros serviços (como aluguel de carro e remarcação)' if serv else '') + '. '
+          'O mercado de agências também vende: locação de carros, traslados e receptivo, ingressos e passeios, chip/eSIM internacional, '
+          'cartão de viagem pré-pago (câmbio) e sala VIP. Pelas fontes que achei, a comissão de hotel, carro, traslado e pacote costuma ficar entre 5% e 15% do valor, '
+          'e em ingressos e seguros pode ser um valor fixo por produto.\n\n'
+          '1. <b>Traslado e receptivo no destino:</b> combina com os passageiros que viajam para fora (lista acima).\n'
+          '2. <b>Aluguel de carro:</b> você já vendeu 1 (Localiza, via Ancoradouro).\n'
+          '3. <b>Chip/eSIM e cartão de viagem pré-pago:</b> são vendidos junto com o seguro, na mesma conversa.\n'
+          '4. <b>Ingressos e passeios:</b> para clientes que já reservaram hotel com você.\n'
+          '5. <b>Taxa de remarcação e alteração:</b> já existe na sua planilha e deixou quase todo o valor como lucro. Cobrar por esse serviço, de forma padronizada, é um produto.\n\n'
+          'Não achei percentuais públicos de comissão para chip, câmbio e sala VIP, então não estimei ganho. '
+          '<b>Quais desses você já consegue comprar de um fornecedor?</b> Com a comissão real, eu calculo o ganho.\n'
+          '<i>Fontes: <a href="https://monde.com.br/plano-de-comissao-receita/">Monde</a>, '
+          '<a href="https://blog.inovvatur.com.br/post/como-calcular-comissao-agentes-viagens-2025/">Inovvatur</a>, '
+          '<a href="https://www.panrotas.com.br/mercado/cartoes-de-assistencia/2026/09/seguro-viagem-protecao-para-o-viajante-receita-para-o-agente-veja-na-revista-panrotas_231705.html">Panrotas</a>.</i>')
 
-    sc = O['seg_cli']
-    tabc = ['Cliente       Comp. Lucro  Marg. Últ.', '-' * 36]
-    for c in O['clientes'][:8]:
-        tabc.append(f'{curto(c)[:13]:<13} {c["n"]:>4} {mil(c["lucro"]).replace("R$ ", ""):>6} {pct(c["margem"], 0):>5} {meses_abrev[c["ultima"] - 1]:>4}')
-    m5 = (f'<b>Seus clientes ({len(O["clientes"])} no período)</b>\n'
-          f'• <b>{sc["recorrentes"]["n"]} recorrentes</b> (3+ compras) geram <b>{pct(sc["recorrentes"]["share"], 0)}</b> do lucro bruto.\n'
-          f'• {sc["ocasionais"]["n"]} ocasionais (2 compras): {pct(sc["ocasionais"]["share"], 0)}.\n'
-          f'• {sc["unicos"]["n"]} de compra única: {pct(sc["unicos"]["share"], 0)}.\n'
-          + (f'• O maior cliente é a empresa <b>{esc(c1["nome"])}</b> (CNPJ {c1["cnpj"]}, {c1["pax"]} passageiros diferentes): sozinha é <b>{pct(share1, 0)}</b> do lucro, com {c1["n"]} compras.\n\n'
-             if c1['empresa'] else f'• O maior cliente ({esc(c1["nome"])}) sozinho é <b>{pct(share1, 0)}</b> do lucro, com {c1["n"]} compras.\n\n')
-          + '<b>Maiores clientes por lucro</b>\n<pre>' + '\n'.join(tabc) + '</pre>')
-    if O['melhores_margens']:
-        m5 += '\n<b>Melhores margens entre os recorrentes</b>\n' + '\n'.join(
-            f'• {esc(c["nome"])}: {pct(c["margem"])} em {c["n"]} compras ({mil(c["lucro"])})' for c in O['melhores_margens'])
+    # ---- 7) retiradas ----
+    m7 = ''
+    if I:
+        tot = I['total']
+        tabr = ['Rota          Trechos    Valor    %', '-' * 34]
+        for k, n, v in I['rotas'][:8]:
+            tabr.append(f'{k.replace(" – ", "–"):<13} {n:>6} {mil(v).replace("R$ ", ""):>8} {pct(v / tot, 0):>4}')
+        usados = sorted({c for k, _, _ in I['rotas'][:8] for c in k.split(' – ') if c in CIDADES})
+        leg = ', '.join(f'{c} = {CIDADES[c]}' for c in usados)
+        linhas7 = [f'<b>Suas retiradas em passagens</b>\n' + para('controlar quanto do seu direito sai em viagens e onde ele se concentra.') + '\n\n'
+                   f'{brl(tot)} em {I["n"]} lançamentos (média de {brl(I["medio"])} por trecho)'
+                   + (f', contra um direito de {brl(R["dir"])} no período' if R else '') + '.',
+                   '<b>Por rota</b> (ida e volta somadas)\n<pre>' + '\n'.join(tabr) + '</pre>' + (f'\n<i>{esc(leg)}</i>' if leg else ''),
+                   '<b>O que mais pesa</b>']
+        pes = ', '.join(f'{esc(k)} {pct(v / tot, 0)}' for k, n, v in I['pessoas'])
+        pontos7 = [f'• <b>Quem retira:</b> {pes}.']
+        mes_pico = max(I['meses'], key=lambda m: I['meses'][m])
+        top_mes = sorted([x for x in I['itens'] if x['data'].month == mes_pico], key=lambda x: -x['valor'])[:3]
+        det = '; '.join((f'{x["rota"]} ' if rota_par(x['rota']) else 'sem rota informada ') + mil(x['valor']) for x in top_mes)
+        pontos7.append(f'• <b>Mês mais pesado: {meses_abrev[mes_pico - 1]}</b> com {mil(I["meses"][mes_pico])} ({pct(I["meses"][mes_pico] / tot, 0)} do total). Maiores itens: {esc(det)}.')
+        if I['sem_rota']:
+            sr = sorted(I['sem_rota'], key=lambda x: -x['valor'])
 
-    acoes = ['<b>O que fazer com os clientes recorrentes</b>']
-    if O['sem_seguro']:
-        nomes = ', '.join(esc(c['nome']) for c in O['sem_seguro'][:5])
-        acoes.append(f'1. <b>Vender seguro para quem já viaja com você:</b> {nomes} têm 2+ bilhetes internacionais e nenhum seguro comprado com você.')
-    if c1['n'] >= 12:
-        quem = f'a empresa {esc(c1["nome"])}, {c1["pax"]} passageiros' if c1['empresa'] else esc(c1['nome'])
-        acoes.append(f'2. <b>Formalizar o maior cliente</b> ({quem}, {c1["n"]} compras, {pct(share1, 0)} do lucro): '
-                     'contrato com taxa de serviço mensal ou prioridade de atendimento. Hoje um único cliente sustenta boa parte do resultado.')
-    alto_vol = [c for c in O['recorrentes'] if c['margem'] < 0.05 and c['valor'] >= 50000]
-    if alto_vol:
-        acoes.append(f'3. <b>Alto volume e comissão baixa</b> ({", ".join(esc(c["nome"]) for c in alto_vol[:3])}): '
-                     'some hotel, seguro e transfer na mesma venda para subir o lucro por cliente.')
-    if O['sumidos']:
-        n_ = ', '.join(esc(c['nome']) for c in sorted(O['sumidos'], key=lambda c: -c['lucro'])[:5])
-        acoes.append(f'4. <b>Reativar quem sumiu</b> (3+ meses sem comprar): {n_}. Mande uma cotação pronta na rota que costumam fazer.')
-    acoes.append('5. <b>Chamar 45 dias antes da próxima viagem:</b> anote em que mês cada recorrente costuma viajar. É quando a tarifa ainda está boa e ele ainda não cotou com outra agência.')
-    acoes.append('6. <b>Pedir indicação</b> aos clientes de melhor margem, logo depois da viagem.')
-    m6 = '\n\n'.join(acoes)
+            def _desc(x):
+                d = ' '.join(t for t in (x['cia'], x['loc']) if t.strip() not in ('', '-'))
+                return f'{x["data"]:%d/%m} {mil(x["valor"])} ({esc(d) if d else "sem descrição"})'
+            pontos7.append(f'• <b>Sem rota ou destino no lançamento:</b> {len(sr)} lançamentos, {mil(sum(x["valor"] for x in sr))} ({pct(sum(x["valor"] for x in sr) / tot, 0)}): '
+                           + '; '.join(_desc(x) for x in sr[:3]) + '. Sem rota, não consigo separar por destino. Me diga o que foram, ou preencha a rota na planilha.')
+        if I['dobradas']:
+            v_d = sum(y['valor'] for g in I['dobradas'] for y in g)
+            pontos7.append(f'• <b>Mesmo voo, duas pessoas:</b> {len(I["dobradas"])} voos foram retirados para mais de uma pessoa na mesma data ({mil(v_d)} no total). É onde o valor retirado dobra sem mudar a rota.')
+        pontos7.append('• <b>Companhia:</b> ' + ', '.join(f'{esc(k)} {pct(v / tot, 0)}' for k, v in I['cias'][:3]) + '.')
+        if R:
+            acima = [x for x in R['M'] if x['retirado'] > x['direito']]
+            if acima:
+                pontos7.append('• <b>Meses acima do direito:</b> ' + '; '.join(f'{x["label"]} (retirou {mil(x["retirado"])}, direito {mil(x["direito"])})' for x in acima)
+                               + '. Seguem o agrupamento da planilha, que pode diferir da data da compra.')
+        linhas7.append('\n'.join(pontos7))
+        linhas7.append('<b>Para equilibrar</b>\n'
+                       '1. Defina um teto mensal igual ao direito do mês (R$ 2.000 fixos + suas comissões). Viagens grandes, como as de julho, podem ser divididas em dois meses.\n'
+                       '2. As rotas que você repete todo mês (as primeiras da tabela) são boas candidatas a emissão em milhas.\n'
+                       '3. Decida se toda viagem precisa de retirada para as duas pessoas. É a forma mais rápida de reduzir o valor sem mudar as rotas.')
+        m7 = '\n\n'.join(linhas7)
 
     aten = []
     if O['sem_pag'][0]:
@@ -356,12 +536,17 @@ def sequencia(O, parcial, rotulo_fim, res, top_conta, R, brl, pct, meses_abrev, 
         aten.append(f'• A conta "{esc(top_conta[0].title())}" emite {pct(top_conta[1] / O["V"], 0)} do volume. Se ela travar, o faturamento trava junto.')
     if R:
         aten.append(f'• Suas retiradas: {brl(R["ret"])} no ano, contra um direito de {brl(R["dir"])} (saldo acumulado {brl(R["fim"])}).')
-    m4 = '<b>Atenção</b>\n' + '\n'.join(aten) if aten else ''
+    m8 = '<b>Atenção</b>\n' + para('conferir o que pode virar problema de caixa ou dependência.') + '\n\n' + '\n'.join(aten) if aten else ''
 
-    seq = [('texto', m1), ('imagem', imgs['lucro']), ('imagem', imgs['tipos']), ('texto', m3), ('texto', m2), ('imagem', imgs['oportunidades']),
-           ('texto', m5), ('imagem', imgs['clientes']), ('texto', m6)]
+    seq = [('texto', m1), ('imagem', imgs['lucro']), ('texto', m2cat), ('imagem', imgs['categorias']),
+           ('texto', m3), ('imagem', imgs['clientes'])]
     if m4:
         seq.append(('texto', m4))
+    seq += [('texto', m5), ('imagem', imgs['oportunidades']), ('texto', m6)]
+    if m7:
+        seq += [('texto', m7), ('imagem', imgs['retiradas'])]
+    if m8:
+        seq.append(('texto', m8))
     return seq
 
 
@@ -396,7 +581,7 @@ def _salva(fig, plt, out, nome):
     return p
 
 
-def graficos(O, out, sufixo):
+def graficos(O, out, sufixo, I=None):
     """Retorna dict nome -> (caminho, legenda)."""
     imgs = {}
 
@@ -419,21 +604,20 @@ def graficos(O, out, sufixo):
     imgs['lucro'] = (_salva(fig, plt, out, f'lucro-mensal-{sufixo}.png'),
                      'Lucro bruto por mês (azul = passagens e hotéis, laranja = seguros). Embaixo do mês: quanto passou pela agência.')
 
-    # 2) quanto cada tipo de venda deixa
-    tp = O['tipos'][::-1]
-    fig, ax, plt = _base('Quanto cada tipo de venda deixa', 'Barra = lucro médio por venda. Texto = vendas, volume que passou e % do valor')
-    ys = list(range(len(tp)))
-    ax.barh(ys, [x['por_venda'] for x in tp], color=[ACCENT2 if x['nome'] == 'Seguro' else ACCENT for x in tp], height=0.62)
+    # 2) retorno por categoria (o que oferecer)
+    ct = O['categorias'][::-1]
+    fig, ax, plt = _base('Retorno por categoria', 'Barra = lucro bruto no período. Texto = vendas, lucro por venda e % do lucro')
+    ys = list(range(len(ct)))
+    ax.barh(ys, [x['lucro'] for x in ct], color=[ACCENT2 if x['nome'] == 'Seguro' else ACCENT for x in ct], height=0.62)
     ax.set_yticks(ys)
-    ax.set_yticklabels([x['curto'] for x in tp], fontsize=9, color=INK)
-    mx = max(x['por_venda'] for x in tp)
-    for y, x in zip(ys, tp):
-        ax.text(x['por_venda'] + mx * 0.015, y, f'R$ {x["por_venda"]:.0f} · {x["n"]} vendas · {mil(x["valor"])} · {_pct(x["margem"])}', va='center', fontsize=8.5, color=INK)
-    ax.set_xlim(0, mx * 2.25)
+    ax.set_yticklabels([x['nome'] for x in ct], fontsize=9, color=INK)
+    mx = max(x['lucro'] for x in ct)
+    for y, x in zip(ys, ct):
+        ax.text(x['lucro'] + mx * 0.015, y, f'{mil(x["lucro"])} · {x["n"]} vendas · R$ {x["por_venda"]:.0f} por venda · {_pct(x["share"])}', va='center', fontsize=8.5, color=INK)
+    ax.set_xlim(0, mx * 2.7)
     ax.xaxis.set_visible(False)
     fig.subplots_adjust(top=0.80, bottom=0.05, left=0.19, right=0.98)
-    imgs['tipos'] = (_salva(fig, plt, out, f'tipos-{sufixo}.png'),
-                     'Lucro médio por venda em cada tipo. Nacional e internacional são separados pelo destino do voo.')
+    imgs['categorias'] = (_salva(fig, plt, out, f'categorias-{sufixo}.png'), 'Retorno por categoria: passagem, hotel, seguro e outros serviços.')
 
     # 3) maiores clientes por lucro
     cl = O['clientes'][:8][::-1]
@@ -464,4 +648,18 @@ def graficos(O, out, sufixo):
     ax.xaxis.set_visible(False)
     fig.subplots_adjust(top=0.80, bottom=0.05, left=0.45, right=0.97)
     imgs['oportunidades'] = (_salva(fig, plt, out, f'oportunidades-{sufixo}.png'), 'Ganho estimado por oportunidade (estimativas).')
+    if I and I['rotas']:
+        rt = I['rotas'][:8][::-1]
+        fig, ax, plt = _base('Suas retiradas por rota', f'Barra = valor retirado (ida e volta somadas). Total: {mil(I["total"])}')
+        ys = list(range(len(rt)))
+        ax.barh(ys, [x[2] for x in rt], color=ACCENT, height=0.62)
+        ax.set_yticks(ys)
+        ax.set_yticklabels([x[0].replace(' – ', '–') for x in rt], fontsize=9, color=INK)
+        mx = max(x[2] for x in rt)
+        for y, x in zip(ys, rt):
+            ax.text(x[2] + mx * 0.015, y, f'{mil(x[2])} · {x[1]} {"trecho" if x[1] == 1 else "trechos"} · {_pct(x[2] / I["total"])}', va='center', fontsize=8.5, color=INK)
+        ax.set_xlim(0, mx * 1.7)
+        ax.xaxis.set_visible(False)
+        fig.subplots_adjust(top=0.80, bottom=0.05, left=0.19, right=0.98)
+        imgs['retiradas'] = (_salva(fig, plt, out, f'retiradas-rotas-{sufixo}.png'), 'Retiradas em passagens por rota.')
     return imgs
