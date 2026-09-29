@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Retiradas do Sócio</title>
+<style>
+/*__CSS__*/
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Suas retiradas em passagens</h1>
+<p class="sub" id="sub"></p>
+<div class="card" style="padding:12px 18px">
+<span class="tag real">DADO REAL</span> lido ou somado da planilha. <span class="tag est">ESTIMATIVA</span> projeção.
+<p class="note" style="margin-bottom:0">Todo mês você tem direito a <b>R$ 2.000,00 + as suas comissões</b> (em dezembro, R$ 4.000,00 + comissões) e recebe esse valor em passagens. <b>Saldo positivo</b> = você retirou menos do que tinha direito. <b>Saldo negativo</b> = você retirou mais e está devendo à agência.</p>
+</div>
+<div class="kpis" id="kpis"></div>
+<div class="card"><h2>Direito x retirado por mês</h2>
+<p class="note"><span class="tag real">DADO REAL</span> Os meses seguem o agrupamento da planilha.</p>
+<div class="legend"><span><i style="background:var(--s1)"></i>Direito</span><span><i style="background:var(--s2)"></i>Retirado</span></div>
+<div class="chart" id="c1"></div>
+<details><summary>Ver tabela</summary><div class="tbl" id="t1"></div></details></div>
+<div class="grid2">
+<div class="card"><h2>Saldo acumulado com a agência</h2><p class="note"><span class="tag real">DADO REAL</span> Começa no saldo trazido do ano anterior.</p><div class="chart" id="c2"></div></div>
+<div class="card"><h2>Para onde foram as retiradas</h2><div class="tbl" id="t2"></div></div>
+</div>
+<div class="card" style="margin-top:16px"><h2>Leitura</h2><ul class="plain" id="read"></ul></div>
+<div class="card"><h2>Problemas encontrados na aba</h2><ul class="plain" id="issues"></ul></div>
+<p class="note">Análise para você decidir. Não é orientação contábil: leve os pontos sobre pró-labore ao seu contador.</p>
+</div>
+<div class="tip" id="tip" hidden></div>
+<script>
+const R=/*__DATA__*/null;
+const brl=v=>(v<0?'−':'')+'R$ '+Math.abs(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+const $=id=>document.getElementById(id),tip=$('tip');
+function showTip(e,h){tip.innerHTML=h;tip.hidden=false;const r=document.body.getBoundingClientRect();let x=e.clientX-r.left+14;if(e.clientX+tip.offsetWidth+24>innerWidth)x-=tip.offsetWidth+28;tip.style.left=x+'px';tip.style.top=(e.clientY-r.top+14)+'px'}
+const hideTip=()=>tip.hidden=true,NS='http://www.w3.org/2000/svg';
+function el(t,a,p){const n=document.createElementNS(NS,t);for(const k in a)n.setAttribute(k,a[k]);if(p)p.appendChild(n);return n}
+function nice(max){const p=Math.pow(10,Math.floor(Math.log10(max||1)));const m=max/p;const s=m<=1.5?.25:m<=3?.5:m<=6?1:2;return {step:s*p,top:Math.ceil(max/(s*p))*s*p}}
+const M=R.M;
+$('sub').textContent=R.sub;
+$('kpis').innerHTML=R.kpis.map(x=>`<div class="kpi"><div class="l">${x[0]}</div><div class="v">${x[1]}</div><div class="d">${x[2]}</div></div>`).join('');
+(function(){const W=1000,H=280,L=64,R_=10,T=10,B=28,svg=el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':'Direito e retirado por mês'});
+ const {step,top}=nice(Math.max(...M.map(r=>Math.max(r.direito,r.retirado)))),y=v=>T+(H-T-B)*(1-v/top),bw=(W-L-R_)/M.length;
+ for(let v=0;v<=top+1e-9;v+=step){el('line',{x1:L,x2:W-R_,y1:y(v),y2:y(v),stroke:v?'var(--grid)':'var(--axis)'},svg);el('text',{x:L-8,y:y(v)+4,'text-anchor':'end'},svg).textContent=v?(v/1000).toLocaleString('pt-BR')+' mil':'0'}
+ M.forEach((r,i)=>{const x0=L+i*bw,w=Math.min(30,bw*.3);
+  [[r.direito,'var(--s1)'],[r.retirado,'var(--s2)']].forEach(([v,c],j)=>{if(v<=0)return;const x=x0+bw/2+(j?1:-w-1),h=y(0)-y(v);el('path',{d:`M${x},${y(0)}v${-(h-4)}q0,-4 4,-4h${w-8}q4,0 4,4v${h-4}z`,fill:c},svg)});
+  el('text',{x:x0+bw/2,y:H-8,'text-anchor':'middle'},svg).textContent=r.label;
+  const hit=el('rect',{x:x0,y:T,width:bw,height:H-T-B,fill:'transparent'},svg);
+  hit.addEventListener('mousemove',e=>showTip(e,`<b>${r.label}</b><br>Direito: ${brl(r.direito)}<br>Retirado: ${brl(r.retirado)} (${r.n} lanç.)<br>Saldo do mês: <b>${brl(r.saldo)}</b>`));hit.addEventListener('mouseleave',hideTip)});
+ $('c1').appendChild(svg);
+ $('t1').innerHTML='<table><tr><th>Mês</th><th>Fixo</th><th>Comissões</th><th>Direito</th><th>Retirado</th><th>Saldo do mês</th></tr>'+M.map(r=>`<tr><td>${r.label}</td><td>${brl(r.fixo)}</td><td>${brl(r.com)}</td><td>${brl(r.direito)}</td><td>${brl(r.retirado)}</td><td>${brl(r.saldo)}</td></tr>`).join('')+`<tr><th>Total</th><th></th><th></th><th>${brl(R.dir)}</th><th>${brl(R.ret)}</th><th>${brl(R.net)}</th></tr></table>`})();
+(function(){const pts=R.pts,labs=['início',...M.map(r=>r.label)];
+ const W=520,H=190,L=62,R_=14,T=16,B=24,svg=el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':'Saldo acumulado'});
+ let lo=Math.min(...pts),hi=Math.max(...pts);const pad=(hi-lo)*.1||1000;lo-=pad;hi+=pad;
+ const y=v=>T+(H-T-B)*(hi-v)/(hi-lo),x=i=>L+(W-L-R_)*i/(pts.length-1);
+ const {step}=nice(hi-lo);for(let v=Math.ceil(lo/step)*step;v<=hi;v+=step){el('line',{x1:L,x2:W-R_,y1:y(v),y2:y(v),stroke:Math.abs(v)<1e-6?'var(--axis)':'var(--grid)'},svg);el('text',{x:L-6,y:y(v)+4,'text-anchor':'end'},svg).textContent=(v/1000).toLocaleString('pt-BR')+' mil'}
+ labs.forEach((l,i)=>el('text',{x:x(i),y:H-6,'text-anchor':'middle'},svg).textContent=l.split('/')[0]);
+ el('path',{d:pts.map((v,i)=>(i?'L':'M')+x(i)+','+y(v)).join(''),fill:'none',stroke:'var(--s1)','stroke-width':2},svg);
+ [0,pts.length-1].forEach(i=>{el('circle',{cx:x(i),cy:y(pts[i]),r:4,fill:'var(--s1)',stroke:'var(--surface)','stroke-width':2},svg);el('text',{x:x(i)+(i?-6:6),y:y(pts[i])-9,'text-anchor':i?'end':'start',class:'lbl'},svg).textContent=brl(pts[i])});
+ pts.forEach((v,i)=>{const hit=el('rect',{x:x(i)-20,y:T,width:40,height:H-T-B,fill:'transparent'},svg);hit.addEventListener('mousemove',e=>showTip(e,`<b>${labs[i]}</b><br>Saldo acumulado: ${brl(v)}`));hit.addEventListener('mouseleave',hideTip)});
+ $('c2').appendChild(svg)})();
+const tr=a=>a.map(([k,v])=>`<tr><td>${k}</td><td>${brl(v)}</td><td>${(v/R.ret*100).toLocaleString('pt-BR',{maximumFractionDigits:1})}%</td></tr>`).join('');
+$('t2').innerHTML='<table><tr><th>Passageiro</th><th>Valor</th><th>%</th></tr>'+tr(R.nomes)+'<tr><th>Tipo</th><th>Valor</th><th>%</th></tr>'+tr(R.tipos)+'<tr><th>5 maiores</th><th>Valor</th><th></th></tr>'+R.maiores.map(([k,v])=>`<tr><td>${k}</td><td>${brl(v)}</td><td></td></tr>`).join('')+'</table>';
+$('read').innerHTML=R.leitura.map(x=>`<li>${x}</li>`).join('');
+$('issues').innerHTML=R.problemas.length?R.problemas.map(x=>`<li>${x}</li>`).join(''):'<li>Nenhum problema encontrado.</li>';
+</script>
+</body>
+</html>

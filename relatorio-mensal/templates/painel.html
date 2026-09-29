@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Painel Financeiro Agência do Futuro</title>
+<style>
+/*__CSS__*/
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1 id="titulo"></h1>
+<p class="sub" id="sub"></p>
+
+<div class="card" style="padding:12px 18px">
+<span class="tag real">DADO REAL</span> número lido ou somado da planilha. &nbsp;
+<span class="tag est">ESTIMATIVA</span> cenário calculado, com a premissa escrita ao lado.
+<p class="note" id="simples"></p>
+<p class="note" style="margin-bottom:0"><b>Receita da agência</b> = Lucro Tributado + Lucro não Tributado + comissões. <b>Despesa</b> = comissões + custo fixo. <b>Lucro</b> = receita − despesa. O <b>valor vendido</b> é o que o cliente paga, e a maior parte vai para a companhia aérea.</p>
+</div>
+
+<div class="kpis" id="kpis"></div>
+
+<div class="card">
+<h2>Receita x despesa por mês</h2>
+<p class="note"><span class="tag real">DADO REAL</span> <span id="parc"></span></p>
+<div class="legend"><span><i style="background:var(--s1)"></i>Receita da agência</span><span><i style="background:var(--s2)"></i>Despesa (comissões + custo fixo)</span></div>
+<div class="chart" id="c1"></div>
+<details><summary>Ver tabela</summary><div class="tbl" id="t1"></div></details>
+</div>
+
+<div class="grid2">
+<div class="card">
+<h2>Custos por categoria</h2>
+<p class="note"><span class="tag real">DADO REAL</span> Total: <b id="ctot"></b></p>
+<div class="chart" id="c2"></div>
+<p class="note" id="sal"></p>
+</div>
+<div class="card">
+<h2>Margem ao longo do tempo</h2>
+<p class="note"><span class="tag real">DADO REAL</span> Lucro ÷ receita da agência: quanto sobra de cada R$ 1 que a agência ganha.</p>
+<div class="chart" id="c3"></div>
+<h2 style="margin-top:14px;font-size:15px">Margem de venda</h2>
+<p class="note">Lucro Tributado ÷ valor vendido: quanto a agência fica de cada venda.</p>
+<div class="chart" id="c4"></div>
+</div>
+</div>
+
+<div class="grid2" style="margin-top:16px">
+<div class="card">
+<h2>Margem por tamanho de venda</h2>
+<p class="note"><span class="tag real">DADO REAL</span> Só vendas com valor acima de zero.</p>
+<div class="chart" id="c5"></div>
+<div class="tbl" id="t5"></div>
+</div>
+<div class="card">
+<h2>Concentração do lucro</h2>
+<p class="note"><span class="tag real">DADO REAL</span> Participação de cada um no Lucro Tributado. Clientes pelo CPF/CNPJ, com CPF mascarado. Fornecedores pela conta de emissão.</p>
+<div class="tbl" id="t6"></div>
+</div>
+</div>
+
+<div class="card" style="margin-top:16px"><h2>Riscos</h2><div id="risks"></div></div>
+
+<div class="card">
+<h2>Melhorias priorizadas</h2>
+<p class="note">Da que traz mais dinheiro (ou protege mais) para a que traz menos. Estimativa é cenário, não promessa.</p>
+<div class="tbl"><table class="imp" id="t7"></table></div>
+</div>
+
+<div class="card"><h2>A receber (aba Fluxo de Caixa)</h2><div class="tbl" id="t8"></div></div>
+
+<div class="card"><h2>Problemas encontrados na planilha</h2><ul class="plain" id="issues"></ul></div>
+
+<p class="note">Análise para você decidir. Não é recomendação de investimento nem orientação contábil.</p>
+</div>
+
+<div class="tip" id="tip" hidden></div>
+<script>
+const D=/*__DATA__*/null;
+const brl=v=>(v<0?'−':'')+'R$ '+Math.abs(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+const pct=v=>(v*100).toLocaleString('pt-BR',{minimumFractionDigits:1,maximumFractionDigits:1})+'%';
+const $=id=>document.getElementById(id),tip=$('tip');
+function showTip(e,h){tip.innerHTML=h;tip.hidden=false;const r=document.body.getBoundingClientRect();let x=e.clientX-r.left+14;if(e.clientX+tip.offsetWidth+24>innerWidth)x-=tip.offsetWidth+28;tip.style.left=x+'px';tip.style.top=(e.clientY-r.top+14)+'px'}
+const hideTip=()=>tip.hidden=true,NS='http://www.w3.org/2000/svg';
+function el(t,a,p){const n=document.createElementNS(NS,t);for(const k in a)n.setAttribute(k,a[k]);if(p)p.appendChild(n);return n}
+function nice(max){const p=Math.pow(10,Math.floor(Math.log10(max||1)));const m=max/p;const s=m<=1.5?.25:m<=3?.5:m<=6?1:2;return {step:s*p,top:Math.ceil(max/(s*p))*s*p}}
+const M=D.M,tot=k=>M.reduce((a,r)=>a+r[k],0),last=M.length-1;
+const lab=i=>M[i].label+(D.parcial&&i==last?'*':'');
+$('titulo').textContent=D.titulo;$('sub').textContent=D.sub;$('simples').textContent=D.simples;
+$('sal').textContent=D.salarios+' '+D.pessoas;
+$('parc').textContent=D.parcial?'* último mês ainda aberto.':'Todos os meses fechados.';
+$('kpis').innerHTML=D.kpis.map(x=>`<div class="kpi"><div class="l">${x[0]}</div><div class="v" style="${x[1].length>16?'font-size:16px':''}">${x[1]}</div><div class="d">${x[2]}</div></div>`).join('');
+
+function bars(id,series,label){
+ const W=1000,H=300,L=64,R=10,T=10,B=28,svg=el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':label});
+ const mx=Math.max(...M.map(r=>Math.max(...series.map(s=>r[s[0]]))));const {step,top}=nice(mx);
+ const y=v=>T+(H-T-B)*(1-v/top),bw=(W-L-R)/M.length;
+ for(let v=0;v<=top+1e-9;v+=step){el('line',{x1:L,x2:W-R,y1:y(v),y2:y(v),stroke:v?'var(--grid)':'var(--axis)'},svg);el('text',{x:L-8,y:y(v)+4,'text-anchor':'end'},svg).textContent=v?(v/1000).toLocaleString('pt-BR')+' mil':'0'}
+ M.forEach((r,i)=>{const x0=L+i*bw,w=Math.min(30,bw*.3);
+  series.forEach(([k,c],j)=>{const v=r[k];if(v<=0)return;const x=x0+bw/2+(j?1:-w-1),h=y(0)-y(v);el('path',{d:`M${x},${y(0)}v${-(h-4)}q0,-4 4,-4h${w-8}q4,0 4,4v${h-4}z`,fill:c},svg)});
+  el('text',{x:x0+bw/2,y:H-8,'text-anchor':'middle'},svg).textContent=lab(i);
+  const hit=el('rect',{x:x0,y:T,width:bw,height:H-T-B,fill:'transparent'},svg);
+  hit.addEventListener('mousemove',e=>showTip(e,`<b>${lab(i)}</b><br>Receita: ${brl(r.receita)}<br>Despesa: ${brl(r.despesa)}<br>Lucro: <b>${brl(r.resultado)}</b>`));hit.addEventListener('mouseleave',hideTip)});
+ $(id).appendChild(svg)}
+bars('c1',[['receita','var(--s1)'],['despesa','var(--s2)']],'Receita e despesa por mês');
+$('t1').innerHTML='<table><tr><th>Mês</th><th>Valor vendido</th><th>Receita</th><th>Comissões</th><th>Custo fixo</th><th>Lucro</th><th>Margem</th></tr>'+
+ M.map((r,i)=>`<tr><td>${lab(i)}</td><td>${brl(r.vendas)}</td><td>${brl(r.receita)}</td><td>${brl(r.com)}</td><td>${brl(r.fixo)}</td><td>${brl(r.resultado)}</td><td>${pct(r.resultado/r.receita)}</td></tr>`).join('')+
+ `<tr><th>Total</th><th>${brl(tot('vendas'))}</th><th>${brl(tot('receita'))}</th><th>${brl(tot('com'))}</th><th>${brl(tot('fixo'))}</th><th>${brl(tot('resultado'))}</th><th>${pct(tot('resultado')/tot('receita'))}</th></tr></table>`;
+
+function hbars(id,C,fmt,tipf){
+ const W=520,rh=30,L=130,R=130,H=C.length*rh+6,svg=el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img'});const mx=Math.max(...C.map(c=>c[1]))||1;
+ C.forEach((c,i)=>{const yy=i*rh+6,w=Math.max(4,(W-L-R)*c[1]/mx);
+  el('text',{x:L-8,y:yy+14,'text-anchor':'end',class:'lbl'},svg).textContent=c[0];
+  el('path',{d:`M${L},${yy+4}h${w-4}q4,0 4,4v8q0,4 -4,4h${-(w-4)}z`,fill:'var(--s1)'},svg);
+  el('text',{x:L+w+6,y:yy+15,class:'lbl'},svg).textContent=fmt(c);
+  const hit=el('rect',{x:0,y:yy,width:W,height:rh,fill:'transparent'},svg);hit.addEventListener('mousemove',e=>showTip(e,tipf(c)));hit.addEventListener('mouseleave',hideTip)});
+ $(id).appendChild(svg)}
+const C=[['Salários',tot('sal')],['Comissões Mariana',tot('comM')],['Comissões Bruno',tot('comB')],['Impostos',tot('imp')],['Contas (tel. etc.)',tot('contas')],['Taxas de cartão',tot('cart')],['PDD e Justiça',tot('pdd')],['Sistema',tot('sist')]].filter(c=>c[1]>0).sort((a,b)=>b[1]-a[1]);
+const all=C.reduce((a,c)=>a+c[1],0);$('ctot').textContent=brl(all);
+hbars('c2',C,c=>brl(c[1])+' · '+pct(c[1]/all),c=>`<b>${c[0]}</b><br>${brl(c[1])} (${pct(c[1]/all)})<br>Média mensal: ${brl(c[1]/M.length)}`);
+
+function line(id,vals,label,tick){
+ const W=520,H=170,L=44,R=14,T=12,B=24,svg=el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':label});
+ const {step,top}=nice(Math.max(...vals)*1.1),y=v=>T+(H-T-B)*(1-v/top),x=i=>L+(W-L-R)*i/Math.max(1,vals.length-1);
+ for(let v=0;v<=top+1e-9;v+=step){el('line',{x1:L,x2:W-R,y1:y(v),y2:y(v),stroke:v?'var(--grid)':'var(--axis)'},svg);el('text',{x:L-6,y:y(v)+4,'text-anchor':'end'},svg).textContent=tick(v)}
+ vals.forEach((v,i)=>el('text',{x:x(i),y:H-6,'text-anchor':'middle'},svg).textContent=lab(i).split('/')[0]+(D.parcial&&i==last?'*':''));
+ el('path',{d:vals.map((v,i)=>(i?'L':'M')+x(i)+','+y(v)).join(''),fill:'none',stroke:'var(--s1)','stroke-width':2,'stroke-linejoin':'round'},svg);
+ [0,vals.length-1].forEach(i=>{el('circle',{cx:x(i),cy:y(vals[i]),r:4,fill:'var(--s1)',stroke:'var(--surface)','stroke-width':2},svg);el('text',{x:x(i)+(i?-6:6),y:y(vals[i])-9,'text-anchor':i?'end':'start',class:'lbl'},svg).textContent=pct(vals[i])});
+ const cross=el('line',{y1:T,y2:H-B,stroke:'var(--axis)',visibility:'hidden'},svg),dot=el('circle',{r:4,fill:'var(--s1)',stroke:'var(--surface)','stroke-width':2,visibility:'hidden'},svg);
+ const hit=el('rect',{x:L,y:T,width:W-L-R,height:H-T-B,fill:'transparent'},svg);
+ hit.addEventListener('mousemove',e=>{const b=svg.getBoundingClientRect(),px=(e.clientX-b.left)*W/b.width,i=Math.max(0,Math.min(vals.length-1,Math.round((px-L)/(W-L-R)*(vals.length-1))));
+  cross.setAttribute('x1',x(i));cross.setAttribute('x2',x(i));cross.setAttribute('visibility','visible');dot.setAttribute('cx',x(i));dot.setAttribute('cy',y(vals[i]));dot.setAttribute('visibility','visible');showTip(e,`<b>${lab(i)}</b><br>${label}: <b>${pct(vals[i])}</b>`)});
+ hit.addEventListener('mouseleave',()=>{hideTip();cross.setAttribute('visibility','hidden');dot.setAttribute('visibility','hidden')});
+ $(id).appendChild(svg)}
+line('c3',M.map(r=>r.resultado/r.receita),'Lucro ÷ receita',v=>Math.round(v*100)+'%');
+line('c4',M.map(r=>r.trib/r.vendas),'Margem de venda',v=>(v*100).toLocaleString('pt-BR',{maximumFractionDigits:1})+'%');
+
+hbars('c5',D.B.map(b=>[b.faixa,b.margem,b]),c=>pct(c[1]),c=>`<b>${c[0]}</b><br>${c[2].n} vendas · ${brl(c[2].vendas)}<br>Lucro: ${brl(c[2].lucro)} (${pct(c[1])})`);
+const BV=D.B.reduce((a,b)=>a+b.vendas,0),BL=D.B.reduce((a,b)=>a+b.lucro,0);
+$('t5').innerHTML='<table><tr><th>Faixa</th><th>Vendas</th><th>% do vendido</th><th>% do lucro</th></tr>'+D.B.map(b=>`<tr><td>${b.faixa}</td><td>${b.n}</td><td>${pct(b.vendas/BV)}</td><td>${pct(b.lucro/BL)}</td></tr>`).join('')+'</table>';
+
+const rows=(a,f)=>a.map(r=>`<tr><td>${f(r)}</td><td>${brl(r.vendas)}</td><td>${brl(r.lucro)}</td><td>${pct(r.share)}<div class="bar" style="width:${r.share*300}%"></div></td></tr>`).join('');
+$('t6').innerHTML='<table><tr><th>Clientes (CPF/CNPJ)</th><th>Vendido</th><th>Lucro</th><th>% lucro</th></tr>'+rows(D.tp,r=>r.doc)+'<tr><th>Contas de emissão</th><th>Vendido</th><th>Lucro</th><th>% lucro</th></tr>'+rows(D.tc,r=>r.k)+'</table>';
+
+$('risks').innerHTML=D.riscos.map(r=>`<div class="risk"><b class="rt">${r.titulo}</b>${r.texto}</div>`).join('');
+$('t7').innerHTML='<tr><th>#</th><th>O que fazer</th><th>Por quê</th><th>Impacto</th><th>Esforço</th></tr>'+D.melhorias.map((m,i)=>`<tr><td>${i+1}</td><td><b>${m.o}</b></td><td>${m.p}</td><td class="${m.t=='est'?'est':''}">${m.i}<br><span class="tag ${m.t=='est'?'est':'real'}">${m.t=='est'?'ESTIMATIVA':'DADO REAL'}</span></td><td>${m.e}</td></tr>`).join('');
+$('t8').innerHTML=D.fc.length?'<table><tr><th>Mês</th><th>Previsto</th></tr>'+D.fc.map(r=>`<tr><td>${r[0]}</td><td>${brl(r[1])}</td></tr>`).join('')+`<tr><th>Total</th><th>${brl(D.fc_total)}</th></tr></table>`+(D.fc_pend.length?'<p class="note">Sem valor na planilha: '+D.fc_pend.join('; ')+'</p>':''):'<p class="note">Nada previsto a partir do mês analisado.</p>';
+$('issues').innerHTML=D.problemas.length?D.problemas.map(x=>`<li>${x}</li>`).join(''):'<li>Nenhum problema encontrado.</li>';
+</script>
+</body>
+</html>
