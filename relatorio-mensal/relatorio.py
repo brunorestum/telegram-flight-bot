@@ -30,6 +30,8 @@ from pathlib import Path
 
 import openpyxl
 
+import oportunidades
+
 AQUI = Path(__file__).parent
 MESES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez']
 MESES_LONGO = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto',
@@ -385,8 +387,9 @@ def analisar(tx, resumo, total_row, renda, fluxo, pend_fluxo, ret, hoje):
         parcial=parcial,
     )
     R = analisar_retiradas(ret, M, ref, ano, hoje, parcial) if ret else None
-    msg = mensagem(D, R, M, riscos, melhorias, res, rec, rotulo_fim, parcial, ano, ref)
-    return D, R, msg
+    O = oportunidades.analisar(vend, M, sem_pag, S, brl, pct)
+    msgs = oportunidades.mensagens(O, M, parcial, rotulo_fim, res, (top_conta[0], top_conta[1][0]), R, brl, pct)
+    return D, R, msgs, O
 
 
 def mascara(doc):
@@ -469,24 +472,6 @@ def analisar_retiradas(ret, M, ref, ano, hoje, parcial):
         leitura=leitura, problemas=problemas)
 
 
-def mensagem(D, R, M, riscos, melhorias, res, rec, rotulo_fim, parcial, ano, ref):
-    ini, fim = M[0], M[-1]
-    linhas = [
-        f'<b>Agência do Futuro · análise até {rotulo_fim}</b>',
-        f'Situação: lucro de {brl(res)} no ano (média de {brl(res / len(M))}/mês). '
-        + (f'{fim["label"]} até agora: {brl(fim["resultado"])}' if parcial else f'{fim["label"]} fechou com {brl(fim["resultado"])}')
-        + f' (em {ini["label"]} foram {brl(ini["resultado"])}).',
-        '',
-        '<b>Maiores riscos</b>',
-    ] + [f'{r["titulo"]}: {r["curto"]}' for r in riscos[:3]] + ['', '<b>O que fazer primeiro</b>'] + [
-        f'{i + 1}. {m["o"]}: {m["i"]}{" (estimativa)" if m["t"] == "est" else ""}' for i, m in enumerate(melhorias[:3])]
-    if R:
-        linhas += ['', f'<b>Suas retiradas:</b> {brl(R["ret"])} no ano, contra um direito de {brl(R["dir"])}. Saldo acumulado: {brl(R["fim"])}.']
-    linhas += ['', 'Os painéis completos vão em anexo (abra no navegador).',
-               '<i>Análise para você decidir. Não é recomendação de investimento.</i>']
-    return '\n'.join(linhas)
-
-
 # ---------- saída ----------
 def render(nome, dados):
     css = (AQUI / 'templates' / 'estilo.css').read_text()
@@ -494,16 +479,32 @@ def render(nome, dados):
     return html.replace('/*__CSS__*/', css).replace('/*__DATA__*/null', json.dumps(dados, ensure_ascii=False, default=str))
 
 
-def enviar_telegram(msg, arquivos):
+def enviar_telegram(msgs, imagens, arquivos):
+    """Mensagens de texto e imagens aparecem em qualquer celular; os HTML vão no fim, como extra."""
     import requests
     token, chat = os.environ['TELEGRAM_BOT_TOKEN'], os.environ['TELEGRAM_CHAT_ID']
     base = f'https://api.telegram.org/bot{token}'
-    r = requests.post(f'{base}/sendMessage', data=dict(chat_id=chat, text=msg, parse_mode='HTML',
-                                                        disable_web_page_preview='true'), timeout=60)
+
+    def texto(m):
+        r = requests.post(f'{base}/sendMessage', data=dict(chat_id=chat, text=m, parse_mode='HTML',
+                                                            disable_web_page_preview='true'), timeout=60)
+        r.raise_for_status()
+
+    texto(msgs[0])
+    for p, legenda in imagens[:2]:
+        with open(p, 'rb') as f:
+            r = requests.post(f'{base}/sendPhoto', data=dict(chat_id=chat, caption=legenda), files=dict(photo=f), timeout=120)
+        r.raise_for_status()
+    texto(msgs[1])
+    with open(imagens[2][0], 'rb') as f:
+        r = requests.post(f'{base}/sendPhoto', data=dict(chat_id=chat, caption=imagens[2][1]), files=dict(photo=f), timeout=120)
     r.raise_for_status()
+    for m in msgs[2:]:
+        texto(m)
     for p in arquivos:
         with open(p, 'rb') as f:
-            r = requests.post(f'{base}/sendDocument', data=dict(chat_id=chat), files=dict(document=(p.name, f, 'text/html')), timeout=120)
+            r = requests.post(f'{base}/sendDocument', data=dict(chat_id=chat, caption='Extra: abra no navegador do computador (no celular o gráfico pode não aparecer).'),
+                              files=dict(document=(p.name, f, 'text/html')), timeout=120)
         r.raise_for_status()
 
 
@@ -515,7 +516,7 @@ def main():
     tx, resumo, total_row, renda = ler_vendas(wv, wf)
     fluxo, pend = ler_fluxo(wv)
     ret = ler_retiradas(wv, wf)
-    D, R, msg = analisar(tx, resumo, total_row, renda, fluxo, pend, ret, hoje)
+    D, R, msgs, O = analisar(tx, resumo, total_row, renda, fluxo, pend, ret, hoje)
     out = Path(os.environ.get('OUT_DIR', 'saida'))
     out.mkdir(parents=True, exist_ok=True)
     sufixo = f'{hoje:%Y-%m}'
@@ -524,12 +525,13 @@ def main():
     if R:
         arquivos.append(out / f'retiradas-{sufixo}.html')
         arquivos[1].write_text(render('retiradas.html', R))
-    (out / f'mensagem-{sufixo}.txt').write_text(msg)
-    print(msg)
+    imagens = oportunidades.graficos(O, out, sufixo)
+    (out / f'mensagem-{sufixo}.txt').write_text('\n\n----\n\n'.join(msgs))
+    print('\n\n----\n\n'.join(msgs))
     if os.environ.get('DRY_RUN') == '1':
         print('\nDRY_RUN: nada enviado. Arquivos em', out.resolve())
         return
-    enviar_telegram(msg, arquivos)
+    enviar_telegram(msgs, imagens, arquivos)
     print('\nEnviado para o Telegram.')
 
 
