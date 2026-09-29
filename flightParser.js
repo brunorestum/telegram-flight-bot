@@ -179,7 +179,7 @@ const SEG2_RE = new RegExp(
     '[\\s\\S]*?' +
     '(?!ADT|CHD|INF)([A-Z]{3}) - [^\\n]*\\n(?:[^\\n]*\\n){0,3}?(\\d{2}) ([A-Z]{3}) (\\d{4}) (\\d{2}:\\d{2})' +
     '[\\s\\S]*?' +
-    '\\n([A-Z0-9]{2}) (\\d+?)\\s*(\\d)\\s*([A-Z])\\b',
+    '\\n([A-Z0-9]{2})\\s+(\\d+?)\\s*(\\d)\\s*([A-Z])\\b',
   'g'
 );
 
@@ -224,7 +224,7 @@ function extractPassengersV2(block) {
   const out = [];
   const lines = block.split('\n');
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/(?:^|\s)(?:ADT|CHD|INF)\s*-\s*(.+)$/);
+    const m = lines[i].match(/(?:ADT|CHD|INF)\s*-\s*([A-ZÀ-ÚÇ][^\n]*\/[^\n]*)$/);
     if (!m) continue;
     let raw = m[1].trim();
     let j = i;
