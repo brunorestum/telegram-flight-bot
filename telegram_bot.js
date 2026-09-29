@@ -283,6 +283,7 @@ function buildRow(data, today) {
     nome: data.nome || '',
     valor: toNumber(data.valor) || 0,
     lucro, // lucro informado (o "Base do imposto" é fórmula da planilha, não é escrito aqui)
+    'lucro da operacao': lucro,
     'lucro na operacao': lucro, // nome antigo da mesma coluna
     obs: data.obs || '',
     vendedor: data.vendedor || '',
