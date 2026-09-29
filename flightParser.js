@@ -426,10 +426,97 @@ function parseItinerarioReserva(text) {
 }
 
 // ---------------------------------------------------------------------------
+// Formato 4: confirmação de HOTEL (ex.: Booking.com)
+//   entrada = "data ida", saída = "data volta", horários em branco,
+//   itinerário = cidade, cia aérea = nome do hotel, localizador = nº de confirmação
+// ---------------------------------------------------------------------------
+
+const MESES_PT = {
+  JANEIRO: 1, FEVEREIRO: 2, MARCO: 3, ABRIL: 4, MAIO: 5, JUNHO: 6,
+  JULHO: 7, AGOSTO: 8, SETEMBRO: 9, OUTUBRO: 10, NOVEMBRO: 11, DEZEMBRO: 12
+};
+const DIAS_SEMANA = { DOMINGO: 0, SEGUNDA: 1, TERCA: 2, QUARTA: 3, QUINTA: 4, SEXTA: 5, SABADO: 6 };
+const semAcento = (t) => String(t).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+
+// O PDF traz só dia + mês + dia da semana. O ano é o que faz o dia da semana
+// bater, entre os anos mais próximos de hoje.
+function inferYear(dia, mes, diaSemana) {
+  const hoje = new Date();
+  let melhor = null;
+  for (let y = hoje.getFullYear() - 2; y <= hoje.getFullYear() + 3; y++) {
+    const d = new Date(y, mes - 1, dia);
+    if (d.getMonth() !== mes - 1) continue;
+    if (diaSemana !== undefined && d.getDay() !== diaSemana) continue;
+    const dist = Math.abs(d - hoje);
+    if (!melhor || dist < melhor.dist) melhor = { y, dist };
+  }
+  return melhor ? melhor.y : null;
+}
+
+function parseHotelBooking(text) {
+  if (!/N[ÚU]MERO DE CONFIRMA[ÇC][ÃA]O/i.test(text)) return null;
+  const ent = text.match(/ENTRADA\s*\n\s*(\d{1,2})\s*\n\s*([A-ZÇÃa-zçã]+)\s*\n\s*([A-Za-zçÇáéíóúÁÉÍÓÚ-]+)/);
+  const sai = text.match(/SA[ÍI]DA\s*\n\s*(\d{1,2})\s*\n\s*([A-ZÇÃa-zçã]+)\s*\n\s*([A-Za-zçÇáéíóúÁÉÍÓÚ-]+)/);
+  if (!ent || !sai) return null;
+
+  const conf = text.match(/N[ÚU]MERO DE CONFIRMA[ÇC][ÃA]O\s*\n\s*([A-Z0-9][A-Z0-9.\- ]{3,20}?)\s*\n/i);
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const hotel = lines[0];
+
+  const mIn = MESES_PT[semAcento(ent[2])];
+  const mOut = MESES_PT[semAcento(sai[2])];
+  if (!mIn || !mOut) return null;
+  const wIn = DIAS_SEMANA[semAcento(ent[3]).split('-')[0]];
+  const wOut = DIAS_SEMANA[semAcento(sai[3]).split('-')[0]];
+  const yIn = inferYear(Number(ent[1]), mIn, wIn);
+  if (!yIn) return null;
+  let yOut = yIn + (mOut < mIn ? 1 : 0);
+  // confere pelo dia da semana; se não bater, tenta o ano seguinte
+  const okDia = (y, d, m, w) => w === undefined || new Date(y, m - 1, d).getDay() === w;
+  if (!okDia(yOut, Number(sai[1]), mOut, wOut) && okDia(yOut + 1, Number(sai[1]), mOut, wOut)) yOut += 1;
+  const pad = (n) => String(n).padStart(2, '0');
+
+  // Cidade: no "Endereço: rua, região, CEP Cidade, País" (o país pode quebrar de linha)
+  let cidade = null;
+  const end = text.match(/Endere[çc]o:\s*([\s\S]*?)\n\s*Telefone/i);
+  if (end) {
+    const partes = end[1].replace(/\s*\n\s*/g, ' ').split(',').map((p) => p.trim()).filter(Boolean);
+    if (partes.length >= 2) {
+      cidade = partes[partes.length - 2].replace(/^[\d][\d\s.-]*\s+/, '').replace(/^[A-Z]{1,2}\d[A-Z\d]*\s+\d[A-Z]{2}\s+/, '').trim();
+    }
+  }
+
+  const hospede = text.match(/Nome do h[óo]spede:\s*([^\n]+)/i);
+  const passageiros = hospede ? [hospede[1].trim()] : [];
+  const nHosp = text.match(/N[úu]mero de h[óo]spedes:\s*(\d+)/i);
+
+  const avisos = ['Reserva de HOTEL: entrada = data ida, saída = data volta. Confira o ano e a cidade.'];
+  if (nHosp && Number(nHosp[1]) > passageiros.length) {
+    avisos.push(`O PDF tem ${nHosp[1]} hóspedes mas só ${passageiros.length} nome. Use "Corrigir" para incluir os outros.`);
+  }
+
+  return {
+    tipo: 'hotel',
+    data_ida: `${pad(ent[1])}/${pad(mIn)}/${yIn}`,
+    horario_ida: null,
+    itinerario_ida: cidade,
+    data_volta: `${pad(sai[1])}/${pad(mOut)}/${yOut}`,
+    horario_volta: null,
+    itinerario_volta: null,
+    cia_aerea: hotel || null,
+    localizador: conf ? conf[1].trim() : null,
+    passageiros,
+    trechos_ida: [],
+    trechos_volta: [],
+    avisos
+  };
+}
+
+// ---------------------------------------------------------------------------
 
 function parseFlightText(rawText) {
   const text = String(rawText || '').replace(/\r/g, '').replace(/ /g, ' ');
-  return parseEticketAgencia(text) || parseItinerarioReserva(text) || parseVisualizarReserva(text) || null;
+  return parseEticketAgencia(text) || parseItinerarioReserva(text) || parseHotelBooking(text) || parseVisualizarReserva(text) || null;
 }
 
 module.exports = { parseFlightText };

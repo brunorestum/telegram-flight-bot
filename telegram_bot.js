@@ -189,8 +189,9 @@ function showValue(v) {
 
 function sendConfirmation(ctx, state) {
   const f = state.flightData;
+  const hotel = f.tipo === 'hotel';
   let text = `
-✈️ Dados do voo:
+${hotel ? '🏨 Dados da hospedagem (entrada = ida, saída = volta):' : '✈️ Dados do voo:'}
 
 📅 Data ida: ${showValue(f.data_ida)}
 🕐 Horário ida: ${showValue(f.horario_ida)}
@@ -200,7 +201,7 @@ function sendConfirmation(ctx, state) {
 🕐 Horário volta: ${showValue(f.horario_volta)}
 🛬 Itinerário volta: ${showValue(f.itinerario_volta)}
 
-✈️ Cia aérea: ${showValue(f.cia_aerea)}
+${hotel ? '🏨 Hotel' : '✈️ Cia aérea'}: ${showValue(f.cia_aerea)}
 🎫 Localizador: ${showValue(f.localizador)}
 👥 Passageiros: ${showValue(f.passageiros)}
 `.trim();
@@ -263,7 +264,7 @@ function buildRow(data, today) {
   const month = Number(today.toLocaleDateString('pt-BR', { ...tz, month: 'numeric' })); // ex: 9
   const lucro = toNumber(data.lucro) || 0; // lucro bruto informado
   const comissao = Math.round(lucro * COMISSAO * 100) / 100;
-  const dash = (v) => (v ? v : '-'); // na planilha, "sem volta" = "-"
+  const dash = (v) => (v ? v : data.tipo === 'hotel' ? '' : '-'); // voo sem volta = "-"; hotel = em branco
   // CPF só com dígitos: apóstrofo mantém o zero à esquerda
   const cpf = /^\d+$/.test(String(data.cpf || '')) ? `'${data.cpf}` : data.cpf || '';
 
