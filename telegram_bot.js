@@ -727,8 +727,7 @@ bot.action('flight_edit', async (ctx) => {
 const sharedFlow = [
   { step: 'asking_account', field: 'conta', prompt: '💼 Qual é a conta?' },
   { step: 'asking_vendedor', field: 'vendedor', prompt: '👨‍💼 Vendedor?' },
-  { step: 'asking_pagamento', field: 'pagamento', prompt: '💳 Forma de pagamento?' },
-  { step: 'asking_obs', field: 'obs', prompt: '📌 Observações (ou /skip)?' }
+  { step: 'asking_pagamento', field: 'pagamento', prompt: '💳 Forma de pagamento?' }
 ];
 
 // Perguntadas para CADA passageiro (1 linha na planilha por passageiro)
