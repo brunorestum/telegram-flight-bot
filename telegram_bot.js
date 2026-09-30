@@ -30,6 +30,12 @@ if (!BOT_TOKEN) {
 }
 
 const bot = new Telegraf(BOT_TOKEN);
+// Link de pagamento Pagar.me: /link, /meuid, botão do menu e aprovação de acessos; registrado antes dos outros handlers
+const linkPagamento = require('./link-pagamento').registrar(bot, {
+  getState: (id) => initUserState(id),
+  carregarAutorizados: () => listarAutorizados(),
+  salvarAutorizado: (id, nome) => salvarAutorizado(id, nome)
+});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ============================================================================
@@ -403,6 +409,52 @@ async function fillGoogleSheet(list) {
 
 
 // ---------------------------------------------------------------------------
+// ABA "Autorizados" (quem o Bruno aprovou para criar links de pagamento)
+// Fica na planilha principal porque a pasta do Render é efêmera.
+// ---------------------------------------------------------------------------
+
+const ABA_AUTORIZADOS = 'Autorizados';
+
+async function listarAutorizados() {
+  if (!GOOGLE_SHEET_ID) return [];
+  try {
+    const r = await getSheets().spreadsheets.values.get({ spreadsheetId: GOOGLE_SHEET_ID, range: `${ABA_AUTORIZADOS}!A2:A` });
+    return (r.data.values || []).map((l) => String(l[0] || '').trim()).filter(Boolean);
+  } catch (e) {
+    if (/Unable to parse range/i.test(e.message)) return []; // a aba ainda não existe: é criada na 1ª aprovação
+    throw e;
+  }
+}
+
+async function salvarAutorizado(id, nome) {
+  const sheets = getSheets();
+  const linha = [[String(id), nome || '', new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })]];
+  const gravar = () => sheets.spreadsheets.values.append({
+    spreadsheetId: GOOGLE_SHEET_ID,
+    range: `${ABA_AUTORIZADOS}!A:C`,
+    valueInputOption: 'RAW',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: linha }
+  });
+  try {
+    await gravar();
+  } catch (e) {
+    if (!/Unable to parse range/i.test(e.message)) throw e;
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      requestBody: { requests: [{ addSheet: { properties: { title: ABA_AUTORIZADOS } } }] }
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: `${ABA_AUTORIZADOS}!A1:C1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [['id', 'nome', 'aprovado em']] }
+    });
+    await gravar();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // PLANILHA DA MARIANA (só quando o vendedor for a Mariana)
 // ---------------------------------------------------------------------------
 
@@ -572,13 +624,32 @@ async function fillMarianaSheet(list) {
 // FLUXO DO BOT
 // ============================================================================
 
+function mostrarMenu(ctx, intro = '👋 Olá! O que você quer fazer?') {
+  return ctx.reply(
+    `${intro}\n\n(Se preferir, é só enviar o PDF da reserva direto.)`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('📄 Extrair PDF', 'menu_pdf')],
+      [Markup.button.callback('💳 Link de pagamento', 'menu_link')]
+    ])
+  );
+}
+
 bot.start((ctx) => {
   userState.delete(ctx.from.id);
   initUserState(ctx.from.id);
+  mostrarMenu(ctx);
+});
+
+bot.action('menu_pdf', async (ctx) => {
+  const state = initUserState(ctx.from.id);
+  if (state.step !== 'waiting_pdf' && !linkPagamento.ehPasso(state.step)) {
+    return ctx.answerCbQuery('Termine o fluxo atual ou envie /restart.', { show_alert: true });
+  }
+  state.step = 'waiting_pdf';
+  await ctx.answerCbQuery();
   ctx.reply(
-    `👋 Olá! Sou um bot para automação de vendas de voos.\n\n` +
-    `📄 Envie um PDF da passagem aérea para começar!\n` +
-    `Se eu não conseguir ler o PDF, você pode preencher os dados manualmente.`
+    '📄 Envie o PDF da reserva (voo, hotel, seguro…).\n' +
+    'Se eu não conseguir ler, você pode preencher os dados na mão com /manual.'
   );
 });
 
@@ -588,6 +659,7 @@ bot.on('document', async (ctx) => {
   const state = initUserState(userId);
 
   try {
+    if (linkPagamento.ehPasso(state.step)) state.step = 'waiting_pdf'; // PDF direto vale mais que o pedido de link
     if (state.step !== 'waiting_pdf') {
       ctx.reply('⏳ Termine o fluxo atual ou envie /restart para recomeçar.');
       return;
@@ -753,7 +825,7 @@ bot.on('text', async (ctx) => {
   if (text === '/restart') {
     userState.delete(userId);
     initUserState(userId);
-    ctx.reply('🔄 Reiniciado! Envie um PDF (ou /manual).');
+    mostrarMenu(ctx, '🔄 Reiniciado! O que você quer fazer?');
     return;
   }
 
@@ -871,8 +943,10 @@ bot.on('text', async (ctx) => {
     }
   }
 
-  if (state.step === 'waiting_pdf') {
-    ctx.reply('📄 Envie um PDF da passagem aérea (ou /manual para preencher na mão).');
+  if (linkPagamento.ehPasso(state.step)) {
+    await linkPagamento.receberDados(ctx, state);
+  } else if (state.step === 'waiting_pdf') {
+    mostrarMenu(ctx, 'O que você quer fazer?');
   } else if (state.step === 'waiting_confirmation') {
     ctx.reply('👆 Use os botões acima para confirmar ou corrigir os dados do voo.');
   } else if (state.step === 'waiting_retry') {
