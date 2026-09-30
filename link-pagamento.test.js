@@ -50,4 +50,9 @@ const cfg = { ...config(), admin: '695765510', autorizados: ['42'] };
 assert.ok(autorizado(695765510, cfg));
 assert.ok(autorizado(42, cfg));
 assert.ok(!autorizado(99, cfg));
+const { somarRecebiveis } = require('./link-pagamento');
+assert.deepStrictEqual(
+  somarRecebiveis([{ amount: 50000, fee: 1500, anticipation_fee: 100 }, { amount: 50000, fee: 1500, anticipation_fee: 0 }]),
+  { bruto: 100000, taxa: 3000, antecipacao: 100, parcelas: 2, liquido: 96900 }
+);
 console.log('ok');

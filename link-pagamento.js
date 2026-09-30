@@ -19,6 +19,7 @@
  *  PAGARME_API_KEY       chave secreta do Pagar.me (sk_...). Nunca no código.
  *  ADMIN_ID              id do Telegram de quem aprova acessos (padrão 695765510)
  *  LINK_AUTORIZADOS      ids do Telegram separados por vírgula (opcional; complementa a aba "Autorizados")
+ *  PAGARME_WEBHOOK_SECRET trecho secreto da URL do webhook: https://SEU-APP/pagarme-webhook/<segredo> (cadastre no painel)
  *  LINK_NOTIFICAR        ids que recebem aviso de cada link criado (opcional)
  *  LINK_VALOR_MAXIMO     teto por link em reais (padrão 50000)
  *  LINK_PARCELAS_MAXIMO  teto de parcelas (padrão 12, máximo aceito pelo código 12)
@@ -30,6 +31,8 @@ const crypto = require('crypto');
 const API_BASE = 'https://api.pagar.me/core/v5';
 const TTL_MS = 10 * 60 * 1000; // pedido não confirmado em 10 minutos é descartado
 const pendentes = new Map();
+const linksCriados = []; // links criados (memória + aba "Links"), para achar quem pediu quando o pagamento chegar
+const chargesAvisadas = new Set();
 const pedidosAcesso = new Map(); // userId -> nome de quem pediu acesso e ainda não foi respondido
 const aprovados = new Set();     // ids aprovados pelo admin (espelho da aba "Autorizados")
 const PASSOS = ['link_cliente', 'link_itinerario', 'link_valor', 'link_parcelas'];
@@ -143,6 +146,44 @@ function textoDoErro(e) {
   const d = e.response && e.response.data;
   const msg = d && (d.message || JSON.stringify(d.errors || d)) ? String(d.message || JSON.stringify(d.errors || d)) : e.message;
   return msg.slice(0, 300);
+}
+
+// ---------------------------------------------------------------------------
+// valor líquido real (só leitura na API do Pagar.me)
+// ---------------------------------------------------------------------------
+
+async function apiGet(caminho, params) {
+  const chave = (process.env.PAGARME_API_KEY || '').trim();
+  if (!chave) throw new Error('PAGARME_API_KEY não está configurada no servidor.');
+  const axios = require('axios');
+  const auth = Buffer.from(`${chave}:`).toString('base64');
+  const r = await axios.get(`${API_BASE}${caminho}`, { params, headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' }, timeout: 30000 });
+  return r.data;
+}
+
+const cent = (n) => Math.round(Number(n) || 0);
+
+/** Soma os recebíveis da cobrança: bruto, taxa (MDR), taxa de antecipação e líquido (tudo em centavos). */
+function somarRecebiveis(lista) {
+  const r = { bruto: 0, taxa: 0, antecipacao: 0, parcelas: lista.length };
+  for (const x of lista) {
+    r.bruto += cent(x.amount);
+    r.taxa += cent(x.fee);
+    r.antecipacao += cent(x.anticipation_fee);
+  }
+  r.liquido = r.bruto - r.taxa - r.antecipacao;
+  return r;
+}
+
+/** Recebíveis nascem um pouco depois do pagamento: tenta algumas vezes antes de desistir. */
+async function consultarLiquido(chargeId, esperas = [0, 10000, 30000, 60000]) {
+  for (const espera of esperas) {
+    if (espera) await new Promise((r) => setTimeout(r, espera));
+    const d = await apiGet('/payables', { charge_id: chargeId, size: 100 });
+    const lista = (d.data || []).filter((x) => !x.charge_id || x.charge_id === chargeId);
+    if (lista.length) return somarRecebiveis(lista);
+  }
+  throw new Error(`o Pagar.me ainda não gerou os recebíveis da cobrança ${chargeId}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +349,9 @@ function registrar(bot, hooks = {}) {
     await ctx.answerCbQuery('Criando...');
     try {
       const link = await criarLink(montarPayload(p, cfg));
+      const rec = { nome: nomeDoLink(p.cliente, p.itinerario), userId: p.userId, cliente: p.cliente, itinerario: p.itinerario, valorCent: p.valorCent, parcelas: p.parcelas, linkId: link.id, criadoEm: Date.now() };
+      linksCriados.push(rec);
+      if (hooks.salvarLink) hooks.salvarLink(rec).catch((e) => console.error('[link] não consegui gravar na aba Links:', e.message));
       console.log(JSON.stringify({ evento: 'link_criado', por: p.userId, cliente: p.cliente, itinerario: p.itinerario, valor: p.valorCent / 100, parcelas: p.parcelas, link_id: link.id }));
       await ctx.editMessageText(`✅ Link criado:\n${link.url}\n\n${nomeDoLink(p.cliente, p.itinerario)}\n${brl(p.valorCent)} em até ${p.parcelas}x sem juros`);
       for (const destino of cfg.notificar.filter((x) => x !== String(ctx.from.id))) {
@@ -318,6 +362,75 @@ function registrar(bot, hooks = {}) {
       await ctx.editMessageText(`Não consegui criar o link: ${textoDoErro(e)}\nNada foi cobrado. Envie o /link de novo quando corrigir.`);
     }
   });
+
+  // Webhook do Pagar.me (charge.paid): consulta o líquido na API e avisa quem pediu o link
+  async function achaLink(chargeId, orderId) {
+    const order = orderId ? await apiGet(`/orders/${orderId}`).catch(() => null) : null;
+    const item = order && order.items && order.items[0];
+    const valor = cent(order ? order.amount : 0);
+    let todos = linksCriados;
+    if (hooks.listarLinks) {
+      const doSheet = await hooks.listarLinks().catch(() => []);
+      todos = [...doSheet, ...linksCriados];
+    }
+    const cand = todos.filter((l) => (item && (item.description || '').startsWith(`${l.cliente} | ${l.itinerario}`.slice(0, 250)) || (item && item.name === l.nome)) && (!valor || l.valorCent === valor));
+    return cand.sort((x, y) => y.criadoEm - x.criadoEm)[0] || null;
+  }
+
+  async function avisarPagamento(evento) {
+    const cfg = config();
+    const charge = evento.data || {};
+    const chargeId = charge.id;
+    if (!chargeId || chargesAvisadas.has(chargeId)) return;
+    chargesAvisadas.add(chargeId);
+    const orderId = charge.order && charge.order.id;
+    let texto;
+    let userId = null;
+    try {
+      const rec = await achaLink(chargeId, orderId);
+      const liq = await consultarLiquido(chargeId);
+      userId = rec && rec.userId;
+      texto = [
+        '💰 Link pago!',
+        rec ? `Venda: ${rec.nome}` : `Cobrança ${chargeId} (não achei qual link gerou esse pagamento)`,
+        `Recebido: ${brl(liq.bruto)}${liq.parcelas > 1 ? ` (${liq.parcelas} parcelas)` : ''}`,
+        `Taxa Pagar.me: ${brl(liq.taxa)}`,
+        liq.antecipacao ? `Antecipação: ${brl(liq.antecipacao)}` : null,
+        `✅ Líquido: ${brl(liq.liquido)}`,
+      ].filter(Boolean).join('\n');
+      console.log(JSON.stringify({ evento: 'link_pago', charge: chargeId, bruto: liq.bruto, taxa: liq.taxa, antecipacao: liq.antecipacao, liquido: liq.liquido }));
+    } catch (e) {
+      console.error('[link] erro ao consultar o líquido:', textoDoErro(e));
+      texto = `💰 Um link foi pago (cobrança ${chargeId}), mas não consegui consultar o líquido: ${textoDoErro(e)}`;
+    }
+    try {
+      if (!userId) throw new Error('sem solicitante');
+      await bot.telegram.sendMessage(userId, texto);
+      return;
+    } catch (e) {
+      if (userId) texto += '\n\n(Não consegui enviar ao solicitante, então mandei para você.)';
+    }
+    await bot.telegram.sendMessage(cfg.admin, texto).catch((e) => console.error('[link] nem o admin recebeu o aviso:', e.message));
+  }
+
+  /** Para o servidor HTTP do bot: responde true se a requisição era do Pagar.me. */
+  function webhookPagarme(req, res) {
+    const segredo = (process.env.PAGARME_WEBHOOK_SECRET || '').trim();
+    if (!segredo || !req.url.startsWith(`/pagarme-webhook/${segredo}`)) return false;
+    let corpo = '';
+    req.on('data', (c) => { corpo += c; if (corpo.length > 1e6) req.destroy(); });
+    req.on('end', () => {
+      res.statusCode = 200;
+      res.end('ok');
+      try {
+        const ev = JSON.parse(corpo);
+        if (ev.type === 'charge.paid') avisarPagamento(ev).catch((e) => console.error('[link] webhook:', e.message));
+      } catch (e) {
+        console.error('[link] webhook com corpo inválido');
+      }
+    });
+    return true;
+  }
 
   // Uma resposta por pergunta: cliente, itinerário, valor, parcelas
   async function receberDados(ctx, state) {
@@ -352,7 +465,7 @@ function registrar(bot, hooks = {}) {
     }
     return perguntar(ctx, state.step, cfg);
   }
-  return { receberDados, ehPasso };
+  return { receberDados, ehPasso, webhookPagarme };
 }
 
-module.exports = { registrar, autorizado, parseValor, parseComando, nomeDoLink, montarPayload, config };
+module.exports = { registrar, autorizado, somarRecebiveis, parseValor, parseComando, nomeDoLink, montarPayload, config };

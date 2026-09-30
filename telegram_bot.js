@@ -34,7 +34,9 @@ const bot = new Telegraf(BOT_TOKEN);
 const linkPagamento = require('./link-pagamento').registrar(bot, {
   getState: (id) => initUserState(id),
   carregarAutorizados: () => listarAutorizados(),
-  salvarAutorizado: (id, nome) => salvarAutorizado(id, nome)
+  salvarAutorizado: (id, nome) => salvarAutorizado(id, nome),
+  salvarLink: (rec) => salvarLink(rec),
+  listarLinks: () => listarLinks()
 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -452,6 +454,40 @@ async function salvarAutorizado(id, nome) {
     });
     await gravar();
   }
+}
+
+// Aba "Links": quem pediu cada link (para avisar o líquido quando o cliente pagar)
+const ABA_LINKS = 'Links';
+
+async function salvarLink(r) {
+  const sheets = getSheets();
+  const linha = [[r.linkId, r.nome, r.userId, r.cliente, r.itinerario, r.valorCent, r.parcelas, r.criadoEm]];
+  const gravar = () => sheets.spreadsheets.values.append({
+    spreadsheetId: GOOGLE_SHEET_ID, range: `${ABA_LINKS}!A:H`, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: linha }
+  });
+  try {
+    await gravar();
+  } catch (e) {
+    if (!/Unable to parse range/i.test(e.message)) throw e;
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      requestBody: { requests: [{ addSheet: { properties: { title: ABA_LINKS } } }] }
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: GOOGLE_SHEET_ID, range: `${ABA_LINKS}!A1:H1`, valueInputOption: 'RAW',
+      requestBody: { values: [['link_id', 'nome', 'id telegram', 'cliente', 'itinerario', 'valor (centavos)', 'parcelas', 'criado em (ms)']] }
+    });
+    await gravar();
+  }
+}
+
+async function listarLinks() {
+  const r = await getSheets().spreadsheets.values.get({ spreadsheetId: GOOGLE_SHEET_ID, range: `${ABA_LINKS}!A2:H` });
+  return (r.data.values || []).map((l) => ({
+    linkId: l[0], nome: l[1], userId: l[2], cliente: l[3], itinerario: l[4],
+    valorCent: Number(l[5]), parcelas: Number(l[6]), criadoEm: Number(l[7])
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,7 +1064,11 @@ if (PUBLIC_URL) {
         domain: PUBLIC_URL.replace(/^https?:\/\//, '').replace(/\/$/, ''),
         hookPath: '/telegram-webhook',
         port: Number(process.env.PORT) || 10000,
-        secretToken: process.env.WEBHOOK_SECRET || undefined
+        secretToken: process.env.WEBHOOK_SECRET || undefined,
+        // o que não for do Telegram (aviso de pagamento do Pagar.me) cai aqui
+        cb: (req, res) => {
+          if (!linkPagamento.webhookPagarme(req, res)) { res.statusCode = 404; res.end(); }
+        }
       }
     })
     .then(() => console.log('🤖 Bot iniciado em modo webhook:', PUBLIC_URL))
