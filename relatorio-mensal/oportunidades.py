@@ -25,8 +25,9 @@ CONSOLIDADORAS_RE = re.compile(r'ancorad\w*|kg\s*travel', re.I)
 SITE_RE = re.compile(r'site|pagante|expedi|taap|hotel|garden|turismo|seguro|coris|emirates|air france|qtar|qatar|^ita$|^tap$|'
                      r'avianca|thai|copa|easyjet|aerolineas|phillipine|cebu|american airlines|^aa (site|altera)|iberia|united|balc[aã]o|consultoria', re.I)
 HOTEL_RE = re.compile(r'expedi|taap|hotel|garden', re.I)
+HOTEL_CIA_RE = re.compile(r'hotel|lodge|resort|boutique|villas?|apartment|suites?', re.I)
 SERVICO_RE = re.compile(r'localiza|hertz|movida|unidas|\bavis\b|altera', re.I)   # aluguel de carro e remarcação
-SEGURO_RE = re.compile(r'assist|coris|affinity|seguro|universal|gta\b', re.I)
+SEGURO_RE = re.compile(r'assist|assit|coris|affinity|seguro|universal|gta\b', re.I)   # 'assit' = grafia errada de Assist Card na planilha
 PAR_RE = re.compile(r'\b[A-Z]{3}-[A-Z]{3}\b')
 COMISSAO_SEGURO = 0.45     # comissão do seguro (informada pelo usuário)
 META_ADESAO_SEGURO = 0.30  # meta: 3 em cada 10 bilhetes internacionais com seguro junto
@@ -62,7 +63,7 @@ def produto(t):
     if not PAR_RE.search(it):
         if SERVICO_RE.search(t['cia']) or SERVICO_RE.search(t['conta']):
             return 'servico'
-        return 'hotel' if HOTEL_RE.search(t['conta']) else 'servico'
+        return 'hotel' if (HOTEL_RE.search(t['conta']) or HOTEL_CIA_RE.search(t['cia'])) else 'servico'
     codigos = re.findall(r'\b[A-Z]{3}\b', it)
     return 'nacional' if all(c in AEROPORTOS_BR for c in codigos) else 'internacional'
 

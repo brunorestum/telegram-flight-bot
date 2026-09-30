@@ -16,6 +16,7 @@ Variáveis de ambiente:
   LOCAL_XLSX                    opcional: usa um .xlsx local em vez do Google (teste)
   DRY_RUN=1                     opcional: não envia nada, só grava os arquivos em OUT_DIR
   OUT_DIR                       pasta de saída (padrão: ./saida)
+  PAGARME_API_KEY               opcional: chave secreta do Pagar.me; liga o bloco "A receber no Pagar.me"
 """
 import calendar
 import collections
@@ -31,6 +32,7 @@ from pathlib import Path
 import openpyxl
 
 import oportunidades
+import pagarme
 
 AQUI = Path(__file__).parent
 MESES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez']
@@ -541,6 +543,10 @@ def main():
     I = oportunidades.insights_retiradas(ctx['itens_ret'], R)
     imgs = oportunidades.graficos(O, out, sufixo, I)
     seq = oportunidades.sequencia(O, ctx['parcial'], ctx['rotulo'], ctx['res'], ctx['top_conta'], R, brl, pct, MESES, imgs, I)
+    extra = pagarme.bloco(hoje, out, sufixo, brl, oportunidades.mil, MESES)  # vazio se PAGARME_API_KEY não estiver configurada
+    if extra:
+        i = len(seq) - 1 if seq[-1][0] == 'texto' and seq[-1][1].startswith('<b>Atenção') else len(seq)
+        seq[i:i] = extra
     texto = '\n\n----\n\n'.join(c for t, c in seq if t == 'texto')
     (out / f'mensagem-{sufixo}.txt').write_text(texto)
     print(texto)
