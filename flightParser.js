@@ -502,7 +502,7 @@ function parseHotelBooking(text) {
     itinerario_ida: cidade,
     data_volta: `${pad(sai[1])}/${pad(mOut)}/${yOut}`,
     horario_volta: null,
-    itinerario_volta: null,
+    itinerario_volta: cidade,
     cia_aerea: hotel || null,
     localizador: conf ? conf[1].trim() : null,
     passageiros,
@@ -541,7 +541,7 @@ function parseHotelExpedia(text) {
   const valorTotal = tot ? Number(tot[1].replace(/,/g, '')) : null;
   return {
     tipo: 'hotel', data_ida: ida, horario_ida: null, itinerario_ida: cidade,
-    data_volta: volta, horario_volta: null, itinerario_volta: null,
+    data_volta: volta, horario_volta: null, itinerario_volta: cidade,
     cia_aerea: hotel, localizador: conf, passageiros, trechos_ida: [], trechos_volta: [], avisos,
     ...(valorTotal > 0 ? { valor_total: valorTotal } : {})
   };

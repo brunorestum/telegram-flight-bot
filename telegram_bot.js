@@ -272,7 +272,8 @@ function buildRow(data, today) {
   const month = Number(today.toLocaleDateString('pt-BR', { ...tz, month: 'numeric' })); // ex: 9
   const lucro = toNumber(data.lucro) || 0; // lucro bruto informado
   const comissao = Math.round(lucro * COMISSAO * 100) / 100;
-  const dash = (v) => (v ? v : data.tipo === 'hotel' ? '' : '-'); // voo sem volta = "-"; hotel = em branco
+  const estadia = data.tipo === 'hotel' || data.tipo === 'seguro'; // sem horário; itinerário da volta = o da ida
+  const dash = (v) => (v ? v : estadia ? '' : '-'); // voo sem volta = "-"; hotel/seguro = em branco
   // CPF só com dígitos: apóstrofo mantém o zero à esquerda
   const cpf = /^\d+$/.test(String(data.cpf || '')) ? `'${data.cpf}` : data.cpf || '';
 
@@ -281,11 +282,11 @@ function buildRow(data, today) {
     mes: month,
     conta: data.conta || '',
     'data da ida': data.data_ida || '',
-    'horario da ida': data.horario_ida || '',
+    'horario da ida': estadia ? '' : data.horario_ida || '',
     'itinerario da ida': data.itinerario_ida || '',
     'data da volta': dash(data.data_volta),
-    'horario da volta': dash(data.horario_volta),
-    'itinerario da volta': dash(data.itinerario_volta),
+    'horario da volta': estadia ? '' : dash(data.horario_volta),
+    'itinerario da volta': estadia ? data.itinerario_ida || '' : dash(data.itinerario_volta),
     'cia aerea': data.cia_aerea || '',
     localizador: data.localizador || '',
     cpf,
