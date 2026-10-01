@@ -488,8 +488,13 @@ function parseHotelBooking(text) {
 
   const hospede = text.match(/Nome do h[óo]spede:\s*([^\n]+)/i);
   const passageiros = hospede ? [hospede[1].trim()] : [];
+  const nHosp = text.match(/N[úu]mero de h[óo]spedes:\s*(\d+)/i);
 
   const avisos = ['Reserva de HOTEL: entrada = data ida, saída = data volta. Confira o ano e a cidade.'];
+  if (nHosp && Number(nHosp[1]) > passageiros.length) {
+    avisos.push(`O PDF tem ${nHosp[1]} hóspedes mas só ${passageiros.length} nome. Use "Corrigir" para incluir os outros.`);
+  }
+
   return {
     tipo: 'hotel',
     data_ida: `${pad(ent[1])}/${pad(mIn)}/${yIn}`,
@@ -507,11 +512,46 @@ function parseHotelBooking(text) {
   };
 }
 
+// Confirmação de hotel da Expedia ("Estadia em <hotel>", "Número do itinerário")
+function parseHotelExpedia(text) {
+  if (!/N[úu]mero do itiner[áa]rio:\s*\d+/i.test(text) || !/Estadia em /i.test(text)) return null;
+  const dt = (rot) => {
+    const m = text.match(new RegExp(rot + '\\s*\\n\\s*[^\\n,]+,\\s*(\\d{1,2}) de ([A-Za-zçÇ]+)\\.? de\\s*(\\d{4})'));
+    const mes = m && Object.entries(MESES_PT).find(([k]) => k.startsWith(semAcento(m[2]).slice(0, 3)))?.[1];
+    return mes ? `${String(m[1]).padStart(2, '0')}/${String(mes).padStart(2, '0')}/${m[3]}` : null;
+  };
+  const ida = dt('Check-in'), volta = dt('Check-out');
+  if (!ida || !volta) return null;
+  const conf = text.match(/N[úu]mero do itiner[áa]rio:\s*(\d+)/i)[1];
+  const lines = text.split('\n').map((l) => l.trim());
+  const i = lines.findIndex((l) => /^N[úu]mero do itiner[áa]rio:/i.test(l));
+  const hotel = lines[i + 1] || null;
+  const end = lines[i + 2] || '';
+  const partes = end.split(',').map((p) => p.trim()).filter(Boolean);
+  const cidade = partes.length >= 2 ? partes[partes.length - 1] : null;
+  const viaj = text.match(/Viajante principal\s*\n\s*([^\n]+)/i);
+  const passageiros = viaj ? [viaj[1].trim()] : [];
+  const nHosp = text.match(/(\d+)\s*h[óo]spedes/i);
+  const avisos = ['Reserva de HOTEL (Expedia): check-in = data ida, check-out = data volta. Confira a cidade (vem junto com o país).'];
+  if (nHosp && Number(nHosp[1]) > passageiros.length) {
+    avisos.push(`O PDF tem ${nHosp[1]} hóspedes mas só ${passageiros.length} nome. Use "Corrigir" para incluir os outros.`);
+  }
+  // Total da estadia ("TotalR$ 20,571.63": vírgula = milhar, ponto = centavos). O bot só pede confirmação.
+  const tot = text.match(/^Total\s*R\$\s*([\d.,]+)\s*$/im);
+  const valorTotal = tot ? Number(tot[1].replace(/,/g, '')) : null;
+  return {
+    tipo: 'hotel', data_ida: ida, horario_ida: null, itinerario_ida: cidade,
+    data_volta: volta, horario_volta: null, itinerario_volta: null,
+    cia_aerea: hotel, localizador: conf, passageiros, trechos_ida: [], trechos_volta: [], avisos,
+    ...(valorTotal > 0 ? { valor_total: valorTotal } : {})
+  };
+}
+
 // ---------------------------------------------------------------------------
 
 function parseFlightText(rawText) {
   const text = String(rawText || '').replace(/\r/g, '').replace(/ /g, ' ');
-  return parseEticketAgencia(text) || parseItinerarioReserva(text) || parseHotelBooking(text) || parseVisualizarReserva(text) || null;
+  return parseEticketAgencia(text) || parseItinerarioReserva(text) || parseHotelBooking(text) || parseHotelExpedia(text) || parseVisualizarReserva(text) || null;
 }
 
 module.exports = { parseFlightText };

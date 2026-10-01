@@ -797,6 +797,34 @@ bot.action('modo_custo', async (ctx) => {
   ctx.reply('🧾 Custo total da reserva?');
 });
 
+function askModo(ctx, state) {
+  state.step = 'res_modo';
+  ctx.reply(
+    'Você vai informar o lucro ou o custo?',
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback('📈 Lucro', 'modo_lucro'),
+        Markup.button.callback('🧾 Custo', 'modo_custo')
+      ]
+    ])
+  );
+}
+
+bot.action('valor_sim', async (ctx) => {
+  const state = initUserState(ctx.from.id);
+  await ctx.answerCbQuery();
+  if (state.step !== 'res_valor' || !(state.flightData.valor_total > 0)) return;
+  state.shared.valor = state.flightData.valor_total;
+  askModo(ctx, state);
+});
+
+bot.action('valor_outro', async (ctx) => {
+  const state = initUserState(ctx.from.id);
+  await ctx.answerCbQuery();
+  if (state.step !== 'res_valor') return;
+  ctx.reply('💰 Qual é o valor total da reserva?');
+});
+
 bot.action('liq_sim', async (ctx) => {
   const state = initUserState(ctx.from.id);
   await ctx.answerCbQuery();
@@ -925,7 +953,19 @@ bot.on('text', async (ctx) => {
       startPassenger(ctx, state);
     } else {
       state.step = 'res_valor';
-      ctx.reply('💰 Valor total da reserva?');
+      const sugerido = state.flightData.valor_total;
+      if (sugerido > 0) {
+        // o parser achou o total no PDF: o usuário só confirma ou digita outro
+        ctx.reply(
+          `💰 O valor total da reserva é R$ ${sugerido.toFixed(2)}?`,
+          Markup.inlineKeyboard([[
+            Markup.button.callback('✅ Sim, é esse', 'valor_sim'),
+            Markup.button.callback('✏️ Outro valor', 'valor_outro')
+          ]])
+        );
+      } else {
+        ctx.reply('💰 Valor total da reserva?');
+      }
     }
     return;
   }
@@ -940,16 +980,7 @@ bot.on('text', async (ctx) => {
     }
     if (state.step === 'res_valor') {
       state.shared.valor = n;
-      state.step = 'res_modo';
-      ctx.reply(
-        'Você vai informar o lucro ou o custo?',
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback('📈 Lucro', 'modo_lucro'),
-            Markup.button.callback('🧾 Custo', 'modo_custo')
-          ]
-        ])
-      );
+      askModo(ctx, state);
       return;
     }
     if (state.step === 'res_lucro') {
