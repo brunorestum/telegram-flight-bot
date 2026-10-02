@@ -412,6 +412,90 @@ async function fillGoogleSheet(list) {
 
 
 // ---------------------------------------------------------------------------
+// CPF já cadastrado: abas "Cadastro Pax" e "Vendas" da planilha principal
+// ---------------------------------------------------------------------------
+
+const ABA_CADASTRO_PAX = process.env.CADASTRO_PAX_SHEET_NAME || 'Cadastro Pax';
+// "Cadastro Pax" fica na planilha ADM (outra planilha): CADASTRO_PAX_SHEET_ID. Sem a variável, procura na principal.
+const CADASTRO_PAX_SHEET_ID = process.env.CADASTRO_PAX_SHEET_ID || GOOGLE_SHEET_ID;
+const TITULOS = new Set(['mr', 'mrs', 'ms', 'miss', 'mstr', 'sr', 'sra']);
+// nome sem acento/título, palavras em ordem alfabética: "SILVA/MARIA MRS" e "Maria Silva" viram o mesmo
+const chaveNome = (n) => norm(n).replace(/[^a-z ]/g, ' ').split(' ').filter((w) => w && !TITULOS.has(w)).sort().join(' ');
+const soDigitos = (v) => String(v || '').replace(/\D/g, '');
+
+const ehColNome = (c) => /^(nome|passageiro|cliente)/.test(c);
+
+// Lê uma aba inteira e acha a linha de cabeçalho (a que tem "cpf" e uma coluna de nome). Sem cabeçalho: null.
+async function lerAba(sheets, planilha, aba) {
+  let r;
+  try {
+    r = await sheets.spreadsheets.values.get({ spreadsheetId: planilha, range: `'${aba}'` });
+  } catch (e) {
+    console.error(`[cpf] não consegui ler a aba "${aba}":`, e.message);
+    return null;
+  }
+  const rows = r.data.values || [];
+  const h = rows.slice(0, 20).findIndex((l) => l.map(norm).includes('cpf') && l.map(norm).some(ehColNome));
+  if (h < 0) return null;
+  const cols = rows[h].map(norm);
+  return { rows: rows.slice(h + 1), header: rows[h], cols, cCpf: cols.indexOf('cpf'), cNome: cols.findIndex(ehColNome), linha: h + 1 };
+}
+
+// CPFs (só dígitos) que a aba tem para o nome
+async function cpfsNaAba(sheets, planilha, aba, chave) {
+  const t = await lerAba(sheets, planilha, aba);
+  if (!t) return [];
+  return t.rows
+    .filter((l) => chaveNome(l[t.cNome]) === chave && soDigitos(l[t.cCpf]).length === 11)
+    .map((l) => soDigitos(l[t.cCpf]));
+}
+
+// Devolve { cpf, origem } ou null. Cadastro Pax vale mais; em "Vendas" vale a venda mais recente.
+async function buscarCpf(nome) {
+  const chave = chaveNome(nome);
+  if (!chave || !GOOGLE_SHEET_ID) return null;
+  try {
+    const sheets = getSheets();
+    const cad = await cpfsNaAba(sheets, CADASTRO_PAX_SHEET_ID, ABA_CADASTRO_PAX, chave);
+    if (cad.length) return { cpf: cad[cad.length - 1], origem: ABA_CADASTRO_PAX };
+    const ven = await cpfsNaAba(sheets, GOOGLE_SHEET_ID, GOOGLE_SHEET_NAME, chave);
+    if (ven.length) return { cpf: ven[ven.length - 1], origem: GOOGLE_SHEET_NAME };
+  } catch (e) {
+    console.error('[cpf] consulta falhou:', e.message);
+  }
+  return null;
+}
+
+// Se o par nome + CPF não está no Cadastro Pax, devolve o que falta perguntar (colunas que o bot não sabe preencher)
+async function prepararCadastro(pax) {
+  const t = await lerAba(getSheets(), CADASTRO_PAX_SHEET_ID, ABA_CADASTRO_PAX);
+  if (!t) return null; // aba ou cabeçalho não encontrado: segue sem cadastrar
+  const chave = chaveNome(pax.nome);
+  if (t.rows.some((l) => chaveNome(l[t.cNome]) === chave && soDigitos(l[t.cCpf]) === soDigitos(pax.cpf))) return null;
+  const auto = (c) => c === 'cpf' || ehColNome(c) || /^data (de )?cadastro|^cadastrad/.test(c);
+  const extras = t.cols.map((c, i) => (c && !auto(c) ? i : -1)).filter((i) => i >= 0);
+  return { t, extras, resp: {}, i: 0 };
+}
+
+async function gravarCadastro(pax, cad) {
+  const { t, resp } = cad;
+  const hoje = new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+  const linha = t.cols.map((c, i) => {
+    if (c === 'cpf') return formatCpf(pax.cpf);
+    if (ehColNome(c)) return pax.nome;
+    if (/^data (de )?cadastro|^cadastrad/.test(c)) return hoje;
+    return resp[i] || '';
+  });
+  await getSheets().spreadsheets.values.append({
+    spreadsheetId: CADASTRO_PAX_SHEET_ID,
+    range: `'${ABA_CADASTRO_PAX}'!A${t.linha}`,
+    valueInputOption: 'USER_ENTERED',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: [linha] }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // ABA "Autorizados" (quem o Bruno aprovou para criar links de pagamento)
 // Fica na planilha principal porque a pasta do Render é efêmera.
 // ---------------------------------------------------------------------------
@@ -867,6 +951,107 @@ const sharedFlow = [
   { step: 'asking_pagamento', field: 'pagamento', prompt: '💳 Forma de pagamento?' }
 ];
 
+function perguntarValor(ctx, state) {
+  state.step = 'res_valor';
+  const sugerido = state.flightData.valor_total;
+  if (sugerido > 0) {
+    // o parser achou o total no PDF: o usuário só confirma ou digita outro
+    ctx.reply(
+      `💰 O valor total da reserva é R$ ${sugerido.toFixed(2)}?`,
+      Markup.inlineKeyboard([[
+        Markup.button.callback('✅ Sim, é esse', 'valor_sim'),
+        Markup.button.callback('✏️ Outro valor', 'valor_outro')
+      ]])
+    );
+  } else {
+    ctx.reply('💰 Valor total da reserva?');
+  }
+}
+
+// Procura o CPF nas planilhas: se achar, o usuário só confirma; se não, digita
+async function askCpf(ctx, state) {
+  state.step = 'pax_cpf';
+  const nome = state.current.nome;
+  const achado = await buscarCpf(nome);
+  if (state.step !== 'pax_cpf' || state.current.nome !== nome) return; // /restart ou outra resposta durante a busca
+  if (!achado) {
+    ctx.reply('🪪 CPF?');
+    return;
+  }
+  state.step = 'pax_cpf_conf';
+  state.current.cpfSugerido = achado.cpf;
+  ctx.reply(
+    `🪪 Achei este CPF para ${nome} (aba ${achado.origem}):\n${formatCpf(achado.cpf)}\n\nEstá certo?`,
+    Markup.inlineKeyboard([[
+      Markup.button.callback('✅ Sim, está certo', 'cpf_sim'),
+      Markup.button.callback('✏️ Informar outro', 'cpf_outro')
+    ]])
+  );
+}
+
+// Guarda o passageiro e segue para o próximo (ou para o valor)
+function avancarPax(ctx, state) {
+  state.paxData.push(state.current);
+  state.paxIndex += 1;
+  if (state.paxIndex < state.passengers.length) {
+    startPassenger(ctx, state);
+  } else {
+    perguntarValor(ctx, state);
+  }
+}
+
+// CPF definido: se ele ainda não está no Cadastro Pax, pergunta o que falta e cadastra; depois segue
+async function concluirCpf(ctx, state, cpf) {
+  delete state.current.cpfSugerido;
+  state.current.cpf = cpf;
+  const pax = state.current;
+  let cad = null;
+  try {
+    cad = await prepararCadastro(pax);
+  } catch (e) {
+    console.error('[cadastro] erro ao conferir o Cadastro Pax:', e.message);
+  }
+  if (userState.get(ctx.from.id) !== state || state.current !== pax) return; // /restart durante a consulta
+  if (!cad) return avancarPax(ctx, state);
+  state.cad = cad;
+  state.step = 'cad_extra';
+  ctx.reply(`🗂️ ${pax.nome} ainda não está no Cadastro Pax. Vou cadastrar. ("-" deixa em branco)`);
+  return perguntarExtra(ctx, state);
+}
+
+async function perguntarExtra(ctx, state) {
+  const cad = state.cad;
+  if (cad.i < cad.extras.length) {
+    ctx.reply(`📝 ${String(cad.t.header[cad.extras[cad.i]]).trim()}?`);
+    return;
+  }
+  const pax = state.current;
+  state.cad = null;
+  try {
+    await gravarCadastro(pax, cad);
+    ctx.reply('✅ Cadastrado no Cadastro Pax.');
+  } catch (e) {
+    console.error('[cadastro] erro ao gravar no Cadastro Pax:', e.message);
+    ctx.reply(`⚠️ Não consegui cadastrar no Cadastro Pax (${e.message}). Sigo com a venda.`);
+  }
+  avancarPax(ctx, state);
+}
+
+bot.action('cpf_sim', async (ctx) => {
+  const state = initUserState(ctx.from.id);
+  await ctx.answerCbQuery();
+  if (state.step !== 'pax_cpf_conf' || !state.current.cpfSugerido) return;
+  await concluirCpf(ctx, state, state.current.cpfSugerido);
+});
+
+bot.action('cpf_outro', async (ctx) => {
+  const state = initUserState(ctx.from.id);
+  await ctx.answerCbQuery();
+  if (state.step !== 'pax_cpf_conf') return;
+  state.step = 'pax_cpf';
+  ctx.reply('🪪 Qual é o CPF?');
+});
+
 // Perguntadas para CADA passageiro (1 linha na planilha por passageiro)
 function startPassenger(ctx, state) {
   const total = state.passengers.length;
@@ -874,8 +1059,8 @@ function startPassenger(ctx, state) {
   state.current = {};
   if (nome) {
     state.current.nome = nome;
-    state.step = 'pax_cpf';
-    ctx.reply(`👤 Passageiro ${state.paxIndex + 1}/${total}: ${nome}\n\n🪪 CPF?`);
+    ctx.reply(`👤 Passageiro ${state.paxIndex + 1}/${total}: ${nome}`);
+    askCpf(ctx, state);
   } else {
     state.step = 'pax_nome';
     ctx.reply(`👤 Passageiro ${state.paxIndex + 1}/${total}\n\n📝 Nome?`);
@@ -942,32 +1127,18 @@ bot.on('text', async (ctx) => {
   // Perguntas por passageiro
   if (state.step === 'pax_nome') {
     state.current.nome = text;
-    state.step = 'pax_cpf';
-    ctx.reply('🪪 CPF?');
+    await askCpf(ctx, state);
     return;
   }
-  if (state.step === 'pax_cpf') {
-    state.current.cpf = text;
-    state.paxData.push(state.current);
-    state.paxIndex += 1;
-    if (state.paxIndex < state.passengers.length) {
-      startPassenger(ctx, state);
-    } else {
-      state.step = 'res_valor';
-      const sugerido = state.flightData.valor_total;
-      if (sugerido > 0) {
-        // o parser achou o total no PDF: o usuário só confirma ou digita outro
-        ctx.reply(
-          `💰 O valor total da reserva é R$ ${sugerido.toFixed(2)}?`,
-          Markup.inlineKeyboard([[
-            Markup.button.callback('✅ Sim, é esse', 'valor_sim'),
-            Markup.button.callback('✏️ Outro valor', 'valor_outro')
-          ]])
-        );
-      } else {
-        ctx.reply('💰 Valor total da reserva?');
-      }
-    }
+  if (state.step === 'pax_cpf' || state.step === 'pax_cpf_conf') { // digitar outro CPF vale mesmo com a sugestão na tela
+    await concluirCpf(ctx, state, text);
+    return;
+  }
+  if (state.step === 'cad_extra') {
+    const cad = state.cad;
+    cad.resp[cad.extras[cad.i]] = text === '-' ? '' : text;
+    cad.i += 1;
+    await perguntarExtra(ctx, state);
     return;
   }
   // Valor total, e depois lucro OU custo: UMA vez por reserva
