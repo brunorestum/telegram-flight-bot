@@ -419,8 +419,18 @@ const ABA_CADASTRO_PAX = process.env.CADASTRO_PAX_SHEET_NAME || 'Cadastro Pax';
 // "Cadastro Pax" fica na planilha ADM (outra planilha): CADASTRO_PAX_SHEET_ID. Sem a variável, procura na principal.
 const CADASTRO_PAX_SHEET_ID = process.env.CADASTRO_PAX_SHEET_ID || GOOGLE_SHEET_ID;
 const TITULOS = new Set(['mr', 'mrs', 'ms', 'miss', 'mstr', 'sr', 'sra']);
-// nome sem acento/título, palavras em ordem alfabética: "SILVA/MARIA MRS" e "Maria Silva" viram o mesmo
-const chaveNome = (n) => norm(n).replace(/[^a-z ]/g, ' ').split(' ').filter((w) => w && !TITULOS.has(w)).sort().join(' ');
+const PARTICULAS = new Set(['da', 'de', 'do', 'das', 'dos', 'e']);
+// palavras do nome, sem acento, título nem partícula: "SILVA/MARIA MRS" -> {maria, silva}
+const palavrasNome = (n) => new Set(norm(n).replace(/[^a-z ]/g, ' ').split(' ').filter((w) => w && !TITULOS.has(w) && !PARTICULAS.has(w)));
+// 'exato' = mesmas palavras; 'parcial' = um é o outro encurtado (precisa de 2+ palavras: "Maria Silva" ~ "Maria Aparecida Silva"); senão null
+function compararNomes(a, b) {
+  const x = palavrasNome(a), y = palavrasNome(b);
+  if (!x.size || !y.size) return null;
+  const [curto, longo] = x.size <= y.size ? [x, y] : [y, x];
+  if (![...curto].every((w) => longo.has(w))) return null;
+  if (curto.size === longo.size) return 'exato';
+  return curto.size >= 2 ? 'parcial' : null;
+}
 const soDigitos = (v) => String(v || '').replace(/\D/g, '');
 
 const ehColNome = (c) => /^(nome|passageiro|cliente)/.test(c);
@@ -441,44 +451,68 @@ async function lerAba(sheets, planilha, aba) {
   return { rows: rows.slice(h + 1), header: rows[h], cols, cCpf: cols.indexOf('cpf'), cNome: cols.findIndex(ehColNome), linha: h + 1 };
 }
 
-// CPFs (só dígitos) que a aba tem para o nome
-async function cpfsNaAba(sheets, planilha, aba, chave) {
+// Linhas da aba cujo nome combina com o do passageiro, com CPF válido: [{cpf, nome, exato, linha}] (linha = nº na planilha)
+async function linhasDoNome(sheets, planilha, aba, nome) {
   const t = await lerAba(sheets, planilha, aba);
-  if (!t) return [];
-  return t.rows
-    .filter((l) => chaveNome(l[t.cNome]) === chave && soDigitos(l[t.cCpf]).length === 11)
-    .map((l) => soDigitos(l[t.cCpf]));
+  if (!t) return { t: null, achados: [] };
+  const achados = [];
+  t.rows.forEach((l, k) => {
+    const m = compararNomes(nome, l[t.cNome]);
+    if (m && soDigitos(l[t.cCpf]).length === 11) achados.push({ cpf: soDigitos(l[t.cCpf]), nome: String(l[t.cNome]).trim(), exato: m === 'exato', linha: t.linha + 1 + k, valores: l });
+  });
+  return { t, achados };
 }
 
-// Devolve { cpf, origem } ou null. Cadastro Pax vale mais; em "Vendas" vale a venda mais recente.
-async function buscarCpf(nome) {
-  const chave = chaveNome(nome);
-  if (!chave || !GOOGLE_SHEET_ID) return null;
+// Todos os CPFs distintos que as planilhas têm para o nome: Cadastro Pax primeiro, depois Vendas;
+// em cada aba, nome igual antes de nome abreviado e linha mais recente antes das antigas.
+async function buscarCpfs(nome) {
+  if (!palavrasNome(nome).size || !GOOGLE_SHEET_ID) return [];
+  const saida = [];
   try {
     const sheets = getSheets();
-    const cad = await cpfsNaAba(sheets, CADASTRO_PAX_SHEET_ID, ABA_CADASTRO_PAX, chave);
-    if (cad.length) return { cpf: cad[cad.length - 1], origem: ABA_CADASTRO_PAX };
-    const ven = await cpfsNaAba(sheets, GOOGLE_SHEET_ID, GOOGLE_SHEET_NAME, chave);
-    if (ven.length) return { cpf: ven[ven.length - 1], origem: GOOGLE_SHEET_NAME };
+    for (const [planilha, aba] of [[CADASTRO_PAX_SHEET_ID, ABA_CADASTRO_PAX], [GOOGLE_SHEET_ID, GOOGLE_SHEET_NAME]]) {
+      const { achados } = await linhasDoNome(sheets, planilha, aba, nome);
+      achados.sort((x, y) => (y.exato - x.exato) || (y.linha - x.linha));
+      for (const c of achados) if (!saida.some((o) => o.cpf === c.cpf)) saida.push({ ...c, origem: aba });
+    }
   } catch (e) {
     console.error('[cpf] consulta falhou:', e.message);
   }
-  return null;
+  return saida;
 }
 
-// Se o par nome + CPF não está no Cadastro Pax, devolve o que falta perguntar (colunas que o bot não sabe preencher)
+// Confere o Cadastro Pax para o par nome + CPF:
+//  null                  já cadastrado (ou aba/cabeçalho não encontrados): nada a fazer
+//  { t, extras, resp, i, antigo }  precisa cadastrar; `antigo` = linha do mesmo nome com OUTRO CPF (ou null)
+//  { ..., atualizar: linha }       já cadastrado, mas com campos em branco: `extras` = só os que faltam
+//  Campo com qualquer texto, inclusive "sem email", conta como preenchido: não pergunta de novo.
 async function prepararCadastro(pax) {
-  const t = await lerAba(getSheets(), CADASTRO_PAX_SHEET_ID, ABA_CADASTRO_PAX);
-  if (!t) return null; // aba ou cabeçalho não encontrado: segue sem cadastrar
-  const chave = chaveNome(pax.nome);
-  if (t.rows.some((l) => chaveNome(l[t.cNome]) === chave && soDigitos(l[t.cCpf]) === soDigitos(pax.cpf))) return null;
+  const { t, achados } = await linhasDoNome(getSheets(), CADASTRO_PAX_SHEET_ID, ABA_CADASTRO_PAX, pax.nome);
+  if (!t) return null;
   const auto = (c) => c === 'cpf' || ehColNome(c) || /^data (de )?cadastro|^cadastrad/.test(c);
   const extras = t.cols.map((c, i) => (c && !auto(c) ? i : -1)).filter((i) => i >= 0);
-  return { t, extras, resp: {}, i: 0 };
+  const mesmo = achados.filter((c) => c.cpf === soDigitos(pax.cpf)).sort((x, y) => (y.exato - x.exato) || (y.linha - x.linha))[0];
+  if (mesmo) {
+    const vazio = (i) => !String(mesmo.valores[i] || '').trim(); // qualquer texto (inclusive "sem email") conta como preenchido
+    const faltam = extras.filter(vazio);
+    return faltam.length ? { t, extras: faltam, resp: {}, i: 0, antigo: null, atualizar: mesmo.linha } : null;
+  }
+  const antigo = achados.sort((x, y) => (y.exato - x.exato) || (y.linha - x.linha))[0] || null;
+  return { t, extras, resp: {}, i: 0, antigo };
 }
 
 async function gravarCadastro(pax, cad) {
   const { t, resp } = cad;
+  if (cad.atualizar) {
+    await getSheets().spreadsheets.values.batchUpdate({
+      spreadsheetId: CADASTRO_PAX_SHEET_ID,
+      requestBody: {
+        valueInputOption: 'USER_ENTERED',
+        data: cad.extras.filter((i) => resp[i]).map((i) => ({ range: `'${ABA_CADASTRO_PAX}'!${colLetter(i + 1)}${cad.atualizar}`, values: [[resp[i]]] }))
+      }
+    });
+    return;
+  }
   const hoje = new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
   const linha = t.cols.map((c, i) => {
     if (c === 'cpf') return formatCpf(pax.cpf);
@@ -968,24 +1002,27 @@ function perguntarValor(ctx, state) {
   }
 }
 
-// Procura o CPF nas planilhas: se achar, o usuário só confirma; se não, digita
+// Procura o CPF nas planilhas: se achar, o usuário escolhe entre os CPFs encontrados (ou informa outro); se não, digita
 async function askCpf(ctx, state) {
   state.step = 'pax_cpf';
   const nome = state.current.nome;
-  const achado = await buscarCpf(nome);
+  const achados = (await buscarCpfs(nome)).slice(0, 3);
   if (state.step !== 'pax_cpf' || state.current.nome !== nome) return; // /restart ou outra resposta durante a busca
-  if (!achado) {
+  if (!achados.length) {
     ctx.reply('🪪 CPF?');
     return;
   }
   state.step = 'pax_cpf_conf';
-  state.current.cpfSugerido = achado.cpf;
+  state.current.cpfsSugeridos = achados.map((a) => a.cpf);
+  const lista = achados.map((a) => `• ${formatCpf(a.cpf)} (aba ${a.origem}${a.exato ? '' : `, cadastrado como ${a.nome}`})`).join('\n');
   ctx.reply(
-    `🪪 Achei este CPF para ${nome} (aba ${achado.origem}):\n${formatCpf(achado.cpf)}\n\nEstá certo?`,
-    Markup.inlineKeyboard([[
-      Markup.button.callback('✅ Sim, está certo', 'cpf_sim'),
-      Markup.button.callback('✏️ Informar outro', 'cpf_outro')
-    ]])
+    achados.length === 1
+      ? `🪪 Achei este CPF para ${nome}:\n${lista}\n\nEstá certo?`
+      : `🪪 Achei ${achados.length} CPFs para ${nome}:\n${lista}\n\nQual é o certo?`,
+    Markup.inlineKeyboard([
+      ...achados.map((a, i) => [Markup.button.callback(`✅ ${formatCpf(a.cpf)}`, `cpf_pick:${i}`)]),
+      [Markup.button.callback('✏️ Informar outro', 'cpf_outro')]
+    ])
   );
 }
 
@@ -1002,7 +1039,7 @@ function avancarPax(ctx, state) {
 
 // CPF definido: se ele ainda não está no Cadastro Pax, pergunta o que falta e cadastra; depois segue
 async function concluirCpf(ctx, state, cpf) {
-  delete state.current.cpfSugerido;
+  delete state.current.cpfsSugeridos;
   state.current.cpf = cpf;
   const pax = state.current;
   let cad = null;
@@ -1014,10 +1051,60 @@ async function concluirCpf(ctx, state, cpf) {
   if (userState.get(ctx.from.id) !== state || state.current !== pax) return; // /restart durante a consulta
   if (!cad) return avancarPax(ctx, state);
   state.cad = cad;
+  if (cad.antigo) {
+    // o nome já tem cadastro com outro CPF: corrigir o antigo ou cadastrar mais um?
+    state.step = 'cad_conflito';
+    ctx.reply(
+      `⚠️ No Cadastro Pax, ${cad.antigo.nome} já tem o CPF ${formatCpf(cad.antigo.cpf)}.\nO CPF informado (${formatCpf(cpf)}) é uma correção?`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('🔁 Sim, corrigir o cadastro', 'cad_corrigir')],
+        [Markup.button.callback('➕ Não, é outra pessoa (cadastrar também)', 'cad_novo')]
+      ])
+    );
+    return;
+  }
+  return iniciarCadastro(ctx, state);
+}
+
+function iniciarCadastro(ctx, state) {
   state.step = 'cad_extra';
-  ctx.reply(`🗂️ ${pax.nome} ainda não está no Cadastro Pax. Vou cadastrar. ("-" deixa em branco)`);
+  const cad = state.cad;
+  if (cad.atualizar) {
+    const faltam = cad.extras.map((i) => String(cad.t.header[i]).trim()).join(', ');
+    ctx.reply(`🗂️ ${state.current.nome} já está no Cadastro Pax, mas sem: ${faltam}. Peço só isso. ("-" se o passageiro não tem)`);
+  } else {
+    ctx.reply(`🗂️ ${state.current.nome} ainda não está no Cadastro Pax. Vou cadastrar. ("-" se o passageiro não tem)`);
+  }
   return perguntarExtra(ctx, state);
 }
+
+bot.action('cad_novo', async (ctx) => {
+  const state = initUserState(ctx.from.id);
+  await ctx.answerCbQuery();
+  if (state.step !== 'cad_conflito') return;
+  await iniciarCadastro(ctx, state);
+});
+
+bot.action('cad_corrigir', async (ctx) => {
+  const state = initUserState(ctx.from.id);
+  await ctx.answerCbQuery();
+  if (state.step !== 'cad_conflito') return;
+  const { t, antigo } = state.cad;
+  state.cad = null;
+  try {
+    await getSheets().spreadsheets.values.update({
+      spreadsheetId: CADASTRO_PAX_SHEET_ID,
+      range: `'${ABA_CADASTRO_PAX}'!${colLetter(t.cCpf + 1)}${antigo.linha}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [[formatCpf(state.current.cpf)]] }
+    });
+    ctx.reply('🔁 CPF corrigido no Cadastro Pax.');
+  } catch (e) {
+    console.error('[cadastro] erro ao corrigir o CPF:', e.message);
+    ctx.reply(`⚠️ Não consegui corrigir o Cadastro Pax (${e.message}). Sigo com a venda.`);
+  }
+  avancarPax(ctx, state);
+});
 
 async function perguntarExtra(ctx, state) {
   const cad = state.cad;
@@ -1029,7 +1116,7 @@ async function perguntarExtra(ctx, state) {
   state.cad = null;
   try {
     await gravarCadastro(pax, cad);
-    ctx.reply('✅ Cadastrado no Cadastro Pax.');
+    ctx.reply(cad.atualizar ? '✅ Cadastro Pax atualizado.' : '✅ Cadastrado no Cadastro Pax.');
   } catch (e) {
     console.error('[cadastro] erro ao gravar no Cadastro Pax:', e.message);
     ctx.reply(`⚠️ Não consegui cadastrar no Cadastro Pax (${e.message}). Sigo com a venda.`);
@@ -1037,11 +1124,12 @@ async function perguntarExtra(ctx, state) {
   avancarPax(ctx, state);
 }
 
-bot.action('cpf_sim', async (ctx) => {
+bot.action(/^cpf_pick:(\d)$/, async (ctx) => {
   const state = initUserState(ctx.from.id);
   await ctx.answerCbQuery();
-  if (state.step !== 'pax_cpf_conf' || !state.current.cpfSugerido) return;
-  await concluirCpf(ctx, state, state.current.cpfSugerido);
+  const cpf = (state.current.cpfsSugeridos || [])[Number(ctx.match[1])];
+  if (state.step !== 'pax_cpf_conf' || !cpf) return;
+  await concluirCpf(ctx, state, cpf);
 });
 
 bot.action('cpf_outro', async (ctx) => {
@@ -1136,7 +1224,8 @@ bot.on('text', async (ctx) => {
   }
   if (state.step === 'cad_extra') {
     const cad = state.cad;
-    cad.resp[cad.extras[cad.i]] = text === '-' ? '' : text;
+    const col = cad.extras[cad.i];
+    cad.resp[col] = text === '-' ? `sem ${String(cad.t.header[col]).trim().toLowerCase()}` : text; // "sem email": marca que não tem, para não perguntar de novo
     cad.i += 1;
     await perguntarExtra(ctx, state);
     return;
