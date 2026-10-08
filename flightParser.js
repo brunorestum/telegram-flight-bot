@@ -548,10 +548,63 @@ function parseHotelExpedia(text) {
 }
 
 // ---------------------------------------------------------------------------
+// Recibo de bilhete eletrônico Air Europa ("RECIBO DE BILLETE ELECTRÓNICO"):
+// o texto do PDF vem SEM espaços ("28Jan2027", "UX5815:05"), nome sem separador.
+// ---------------------------------------------------------------------------
+
+const AEROPORTOS = [[/GUARULHOS/, 'GRU'], [/MADRID/, 'MAD'], [/LISBON|LISBOA/, 'LIS'], [/GALEAO|RIODEJANEIRO/, 'GIG'],
+  [/VIRACOPOS|CAMPINAS/, 'VCP'], [/CONFINS|BELOHORIZONTE/, 'CNF'], [/BARCELONA/, 'BCN'], [/PORTO(?!ALEGRE)/, 'OPO']];
+const MESES_EN = { JAN: '01', FEB: '02', MAR: '03', APR: '04', MAY: '05', JUN: '06', JUL: '07', AUG: '08', SEP: '09', OCT: '10', NOV: '11', DEC: '12' };
+
+function parseEticketAirEuropa(text) {
+  if (!/ELECTRONICTICKETRECEIPT/i.test(text) || !/AIREUROPA/i.test(text)) return null;
+  const re2 = /([^\n]+(?:\n(?!Terminal)[^\n]+)?)\n(?:Terminal[^\n]*\n)?([^\n]+(?:\n(?!Terminal)[^\n]+)?)\n(?:Terminal[^\n]*\n)?([A-Z0-9]{2}\d+?)(\d{2}:\d{2})\n(\d{2})([A-Za-z]{3})(\d{4})\n(\d{2}:\d{2})\n(\d{2})([A-Za-z]{3})(\d{4})/g;
+  const cidades = ((text.match(/FareCalculation:([^\n]+)/) || [])[1] || '').split('/').map((x) => x.slice(0, 3));
+  const iata = (nome, i) => {
+    const n = nome.toUpperCase().replace(/[^A-Z]/g, '');
+    const hit = AEROPORTOS.find(([r]) => r.test(n));
+    return hit ? hit[1] : cidades[i] || null;
+  };
+  const segs = [];
+  let m;
+  while ((m = re2.exec(text)) !== null) {
+    const mes1 = MESES_EN[m[6].toUpperCase()];
+    const mes2 = MESES_EN[m[10].toUpperCase()];
+    if (!mes1 || !mes2) continue;
+    const i = segs.length;
+    segs.push({
+      de: iata(m[1], i === 0 ? 0 : i), dataSaida: `${m[5]}/${mes1}/${m[7]}`, saida: m[4],
+      para: iata(m[2], i + 1), dataChegada: `${m[9]}/${mes2}/${m[11]}`, chegada: m[8], voo: m[3]
+    });
+  }
+  if (!segs.length) return null;
+
+  // Ida x volta: separa na pausa >= 20h (conexão curta não conta)
+  let splitAt = -1;
+  for (let i = 0; i < segs.length - 1; i++) {
+    if (toDate(segs[i + 1].dataSaida, segs[i + 1].saida) - toDate(segs[i].dataChegada, segs[i].chegada) >= MIN_PAUSA_MS) { splitAt = i; break; }
+  }
+  const ida = splitAt >= 0 ? segs.slice(0, splitAt + 1) : segs;
+  const volta = splitAt >= 0 ? segs.slice(splitAt + 1) : [];
+
+  // "FigueiredoKrullJarbasMrs(ADT)" = SOBRENOMES + NOME, sem espaços: separo nas maiúsculas
+  const passageiros = [];
+  const rx = /Passenger:([A-Za-zÀ-ú]+?)(?:Mr|Mrs|Ms|Miss|Mstr)?\((?:ADT|CHD|INF)\)/g;
+  while ((m = rx.exec(text)) !== null) {
+    const p = m[1].replace(/([a-zà-ú])([A-ZÀ-Ú])/g, '$1 $2').split(' ');
+    const nome = p.length > 1 ? [p[p.length - 1], ...p.slice(0, -1)] : p;
+    passageiros.push(nome.join(' '));
+  }
+  const avisos = ['O PDF não tem espaços no nome: separei pelas maiúsculas e assumi "sobrenomes + último = nome". Confira o nome.'];
+  const loc = (text.match(/Bookingref:\s*\n?\s*[A-Z0-9]{2}\/([A-Z0-9]{6})/) || [])[1];
+  return buildResult({ ida, volta, localizador: loc, passageiros, avisos });
+}
+
+// ---------------------------------------------------------------------------
 
 function parseFlightText(rawText) {
   const text = String(rawText || '').replace(/\r/g, '').replace(/ /g, ' ');
-  return parseEticketAgencia(text) || parseItinerarioReserva(text) || parseHotelBooking(text) || parseHotelExpedia(text) || parseVisualizarReserva(text) || null;
+  return parseEticketAgencia(text) || parseEticketAirEuropa(text) || parseItinerarioReserva(text) || parseHotelBooking(text) || parseHotelExpedia(text) || parseVisualizarReserva(text) || null;
 }
 
 module.exports = { parseFlightText };
