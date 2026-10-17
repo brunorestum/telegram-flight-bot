@@ -432,6 +432,12 @@ function compararNomes(a, b) {
   return curto.size >= 2 ? 'parcial' : null;
 }
 const soDigitos = (v) => String(v || '').replace(/\D/g, '');
+// CPF (11) ou CNPJ (14) só com dígitos; a planilha perde o zero à esquerda quando a célula é número (10 -> 11, 13 -> 14). Inválido: ''
+const soDoc = (v) => {
+  let d = soDigitos(v);
+  if (d.length === 10 || d.length === 13) d = d.padStart(d.length + 1, '0');
+  return d.length === 11 || d.length === 14 ? d : '';
+};
 
 const ehColNome = (c) => /^(nome|passageiro|cliente)/.test(c);
 
@@ -458,7 +464,7 @@ async function linhasDoNome(sheets, planilha, aba, nome) {
   const achados = [];
   t.rows.forEach((l, k) => {
     const m = compararNomes(nome, l[t.cNome]);
-    if (m && soDigitos(l[t.cCpf]).length === 11) achados.push({ cpf: soDigitos(l[t.cCpf]), nome: String(l[t.cNome]).trim(), exato: m === 'exato', linha: t.linha + 1 + k, valores: l });
+    if (m && soDoc(l[t.cCpf])) achados.push({ cpf: soDoc(l[t.cCpf]), nome: String(l[t.cNome]).trim(), exato: m === 'exato', linha: t.linha + 1 + k, valores: l });
   });
   return { t, achados };
 }
@@ -490,11 +496,14 @@ async function prepararCadastro(pax) {
   const { t, achados } = await linhasDoNome(getSheets(), CADASTRO_PAX_SHEET_ID, ABA_CADASTRO_PAX, pax.nome);
   if (!t) return null;
   const auto = (c) => c === 'cpf' || ehColNome(c) || /^data (de )?cadastro|^cadastrad/.test(c);
+  // em branco ou só traço: qualquer outro texto (inclusive "sem email") conta como preenchido
+  const vazio = (v) => /^[\s\-–—]*$/.test(String(v || ''));
   const extras = t.cols.map((c, i) => (c && !auto(c) ? i : -1)).filter((i) => i >= 0);
-  const mesmo = achados.filter((c) => c.cpf === soDigitos(pax.cpf)).sort((x, y) => (y.exato - x.exato) || (y.linha - x.linha))[0];
+  // mesmo CPF/CNPJ pode ter mais de uma linha (duplicatas): fica a mais preenchida
+  const cheios = (c) => extras.filter((i) => !vazio(c.valores[i])).length;
+  const mesmo = achados.filter((c) => c.cpf === soDoc(pax.cpf)).sort((x, y) => (cheios(y) - cheios(x)) || (y.linha - x.linha))[0];
   if (mesmo) {
-    const vazio = (i) => !String(mesmo.valores[i] || '').trim(); // qualquer texto (inclusive "sem email") conta como preenchido
-    const faltam = extras.filter(vazio);
+    const faltam = extras.filter((i) => vazio(mesmo.valores[i]));
     return faltam.length ? { t, extras: faltam, resp: {}, i: 0, antigo: null, atualizar: mesmo.linha } : null;
   }
   const antigo = achados.sort((x, y) => (y.exato - x.exato) || (y.linha - x.linha))[0] || null;
@@ -627,6 +636,7 @@ const MESES_MAIUSC = [
 function formatCpf(v) {
   const d = String(v || '').replace(/\D/g, '');
   if (d.length === 11) return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
+  if (d.length === 14) return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12)}`;
   return v || '';
 }
 
@@ -1009,7 +1019,7 @@ async function askCpf(ctx, state) {
   const achados = (await buscarCpfs(nome)).slice(0, 3);
   if (state.step !== 'pax_cpf' || state.current.nome !== nome) return; // /restart ou outra resposta durante a busca
   if (!achados.length) {
-    ctx.reply('🪪 CPF?');
+    ctx.reply('🪪 CPF ou CNPJ?');
     return;
   }
   state.step = 'pax_cpf_conf';
@@ -1017,8 +1027,8 @@ async function askCpf(ctx, state) {
   const lista = achados.map((a) => `• ${formatCpf(a.cpf)} (aba ${a.origem}${a.exato ? '' : `, cadastrado como ${a.nome}`})`).join('\n');
   ctx.reply(
     achados.length === 1
-      ? `🪪 Achei este CPF para ${nome}:\n${lista}\n\nEstá certo?`
-      : `🪪 Achei ${achados.length} CPFs para ${nome}:\n${lista}\n\nQual é o certo?`,
+      ? `🪪 Achei este CPF/CNPJ para ${nome}:\n${lista}\n\nEstá certo?`
+      : `🪪 Achei ${achados.length} CPFs/CNPJs para ${nome}:\n${lista}\n\nQual é o certo?`,
     Markup.inlineKeyboard([
       ...achados.map((a, i) => [Markup.button.callback(`✅ ${formatCpf(a.cpf)}`, `cpf_pick:${i}`)]),
       [Markup.button.callback('✏️ Informar outro', 'cpf_outro')]
