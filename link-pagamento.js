@@ -373,8 +373,20 @@ function registrar(bot, hooks = {}) {
       const doSheet = await hooks.listarLinks().catch(() => []);
       todos = [...doSheet, ...linksCriados];
     }
-    const cand = todos.filter((l) => (item && (item.description || '').startsWith(`${l.cliente} | ${l.itinerario}`.slice(0, 250)) || (item && item.name === l.nome)) && (!valor || l.valorCent === valor));
-    return cand.sort((x, y) => y.criadoEm - x.criadoEm)[0] || null;
+    const igual = (x, y) => String(x || '').toLowerCase() === String(y || '').toLowerCase();
+    const urls = ((order && order.checkouts) || []).map((c) => `${c.payment_url || ''} ${c.id || ''}`.toLowerCase()).join(' ');
+    const ordenar = (l) => l.sort((x, y) => y.criadoEm - x.criadoEm)[0] || null;
+    // 1) pelo id do link, que aparece na URL/id do checkout do pedido (o mais seguro)
+    const porId = todos.filter((l) => l.linkId && urls.includes(String(l.linkId).toLowerCase()));
+    if (porId.length) return ordenar(porId);
+    // 2) pelo nome/descrição do item + valor
+    const porNome = todos.filter((l) => (item && (String(item.description || '').startsWith(`${l.cliente} | ${l.itinerario}`.slice(0, 250)) || igual(item.name, l.nome))) && (!valor || l.valorCent === valor));
+    if (porNome.length) return ordenar(porNome);
+    // 3) só pelo valor, nos últimos 30 dias, e só se for um único link (se houver dúvida, não chuta)
+    const recentes = todos.filter((l) => valor && l.valorCent === valor && Date.now() - l.criadoEm < 30 * 864e5);
+    if (recentes.length === 1) return recentes[0];
+    console.error(JSON.stringify({ evento: 'link_nao_achado', charge: chargeId, valor, item: item ? { name: item.name, description: item.description } : null, checkouts: (order && order.checkouts || []).length, links_conhecidos: todos.length }));
+    return null;
   }
 
   async function avisarPagamento(evento) {
