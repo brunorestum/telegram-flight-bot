@@ -175,14 +175,19 @@ function somarRecebiveis(lista) {
   return r;
 }
 
-/** Recebíveis nascem um pouco depois do pagamento: tenta algumas vezes antes de desistir. */
-async function consultarLiquido(chargeId, esperas = [0, 10000, 30000, 60000]) {
+/** Recebíveis nascem aos poucos (um por parcela): espera ter todos antes de somar.
+ *  `parcelas` = nº de parcelas da cobrança (do webhook). Se acabar o tempo com recebíveis a menos, devolve o que tem com `incompleto: true`. */
+async function consultarLiquido(chargeId, parcelas = 0, esperas = [0, 10000, 30000, 60000, 120000, 180000]) {
+  let ultimo = null;
   for (const espera of esperas) {
     if (espera) await new Promise((r) => setTimeout(r, espera));
     const d = await apiGet('/payables', { charge_id: chargeId, size: 100 });
     const lista = (d.data || []).filter((x) => !x.charge_id || x.charge_id === chargeId);
-    if (lista.length) return somarRecebiveis(lista);
+    if (!lista.length) continue;
+    ultimo = lista;
+    if (!parcelas || lista.length >= parcelas) return somarRecebiveis(lista);
   }
+  if (ultimo) return { ...somarRecebiveis(ultimo), incompleto: true, esperadas: parcelas };
   throw new Error(`o Pagar.me ainda não gerou os recebíveis da cobrança ${chargeId}`);
 }
 
@@ -400,7 +405,8 @@ function registrar(bot, hooks = {}) {
     let userId = null;
     try {
       const rec = await achaLink(chargeId, orderId);
-      const liq = await consultarLiquido(chargeId);
+      const tr = charge.last_transaction || {};
+      const liq = await consultarLiquido(chargeId, Number(tr.installments || charge.installments) || 0);
       userId = rec && rec.userId;
       texto = [
         '💰 Link pago!',
@@ -409,6 +415,7 @@ function registrar(bot, hooks = {}) {
         `Taxa Pagar.me: ${brl(liq.taxa)}`,
         liq.antecipacao ? `Antecipação: ${brl(liq.antecipacao)}` : null,
         `✅ Líquido: ${brl(liq.liquido)}`,
+        liq.incompleto ? `⚠️ Só ${liq.parcelas} de ${liq.esperadas} parcelas tinham recebível quando consultei: o líquido acima é PARCIAL. Confira no painel do Pagar.me.` : null,
       ].filter(Boolean).join('\n');
       console.log(JSON.stringify({ evento: 'link_pago', charge: chargeId, bruto: liq.bruto, taxa: liq.taxa, antecipacao: liq.antecipacao, liquido: liq.liquido }));
     } catch (e) {
