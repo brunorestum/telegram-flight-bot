@@ -1019,7 +1019,7 @@ async function askCpf(ctx, state) {
   const achados = (await buscarCpfs(nome)).slice(0, 3);
   if (state.step !== 'pax_cpf' || state.current.nome !== nome) return; // /restart ou outra resposta durante a busca
   if (!achados.length) {
-    ctx.reply('🪪 CPF ou CNPJ?');
+    ctx.reply('🪪 Qual CPF/CNPJ?');
     return;
   }
   state.step = 'pax_cpf_conf';
@@ -1027,8 +1027,8 @@ async function askCpf(ctx, state) {
   const lista = achados.map((a) => `• ${formatCpf(a.cpf)} (aba ${a.origem}${a.exato ? '' : `, cadastrado como ${a.nome}`})`).join('\n');
   ctx.reply(
     achados.length === 1
-      ? `🪪 Achei este CPF/CNPJ para ${nome}:\n${lista}\n\nEstá certo?`
-      : `🪪 Achei ${achados.length} CPFs/CNPJs para ${nome}:\n${lista}\n\nQual é o certo?`,
+      ? `🪪 Achei este CPF para ${nome}:\n${lista}\n\nEstá certo?`
+      : `🪪 Achei ${achados.length} CPFs para ${nome}:\n${lista}\n\nQual é o certo?`,
     Markup.inlineKeyboard([
       ...achados.map((a, i) => [Markup.button.callback(`✅ ${formatCpf(a.cpf)}`, `cpf_pick:${i}`)]),
       [Markup.button.callback('✏️ Informar outro', 'cpf_outro')]
@@ -1147,7 +1147,7 @@ bot.action('cpf_outro', async (ctx) => {
   await ctx.answerCbQuery();
   if (state.step !== 'pax_cpf_conf') return;
   state.step = 'pax_cpf';
-  ctx.reply('🪪 Qual é o CPF?');
+  ctx.reply('🪪 Qual CPF/CNPJ?');
 });
 
 // Perguntadas para CADA passageiro (1 linha na planilha por passageiro)
@@ -1229,7 +1229,18 @@ bot.on('text', async (ctx) => {
     return;
   }
   if (state.step === 'pax_cpf' || state.step === 'pax_cpf_conf') { // digitar outro CPF vale mesmo com a sugestão na tela
-    await concluirCpf(ctx, state, text);
+    if (text === '-') { // sem documento (ex.: estrangeiro): fica "-" na venda e não cadastra no Cadastro Pax
+      state.current.cpf = '-';
+      delete state.current.cpfsSugeridos;
+      avancarPax(ctx, state);
+      return;
+    }
+    // só números, com ou sem . - / e espaços; 11 dígitos (CPF) ou 14 (CNPJ)
+    if (!/^[\d.\-/\s]+$/.test(text) || ![11, 14].includes(soDigitos(text).length)) {
+      ctx.reply('⚠️ Documento inválido. Envie só números (pontos, traço e barra são aceitos): CPF com 11 dígitos ou CNPJ com 14. Se não tem documento, envie "-".');
+      return;
+    }
+    await concluirCpf(ctx, state, text.trim());
     return;
   }
   if (state.step === 'cad_extra') {
